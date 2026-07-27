@@ -1,3 +1,4 @@
+const history = @import("history.zig");
 const prompt = @import("prompt.zig");
 
 const zsh = @cImport({
@@ -41,6 +42,8 @@ var module_features = zsh.struct_features{
 };
 
 pub export fn setup_(_: zsh.Module) callconv(.c) c_int {
+    const history_result = history.setup();
+    if (history_result != 0) return history_result;
     return prompt.setup();
 }
 
@@ -58,6 +61,7 @@ pub export fn boot_(_: zsh.Module) callconv(.c) c_int {
 }
 
 pub export fn cleanup_(module: zsh.Module) callconv(.c) c_int {
+    history.cleanup();
     return zsh.setfeatureenables(module, &module_features, null);
 }
 

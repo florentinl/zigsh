@@ -6,12 +6,12 @@ const zsh = @cImport({
 
 var count: u64 = 0;
 
-fn init_prompt(new_prompt: [:0]const u8) void {
+fn initPrompt(new_prompt: [:0]const u8) void {
     zsh.zsfree(zsh.prompt);
     zsh.prompt = zsh.ztrdup_metafy(new_prompt);
 }
 
-fn update_prompt(new_prompt: [:0]u8) void {
+fn updatePrompt(new_prompt: [:0]u8) void {
     zsh.zsfree(zsh.prompt);
     zsh.prompt = zsh.metafy(
         new_prompt.ptr,
@@ -23,12 +23,12 @@ fn update_prompt(new_prompt: [:0]u8) void {
 pub fn setup() c_int {
     zsh.opts[zsh.PROMPTSUBST] = 0;
     zsh.rprompt_indent = 0;
-    init_prompt("welcome to zig -> ");
-    _ = zsh.addzlefunction(@constCast("zle-line-pre-redraw"), __line_pre_redraw, 0);
+    initPrompt("welcome to zig -> ");
+    _ = zsh.addzlefunction(@constCast("zle-line-pre-redraw"), linePreRedraw, 0);
     return 0;
 }
 
-pub fn __line_pre_redraw(_: [*c][*c]u8) callconv(.c) c_int {
+pub fn linePreRedraw(_: [*c][*c]u8) callconv(.c) c_int {
     count += 1;
     const new_prompt: [:0]u8 = std.fmt.allocPrintSentinel(
         allocators.permanent,
@@ -37,7 +37,7 @@ pub fn __line_pre_redraw(_: [*c][*c]u8) callconv(.c) c_int {
         0,
     ) catch return 1;
 
-    update_prompt(new_prompt);
+    updatePrompt(new_prompt);
     zsh.zle_resetprompt();
     return 0;
 }
