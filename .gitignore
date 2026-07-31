@@ -1,3 +1,5 @@
 .zig-cache/
+zig-pkg/
 zig-out/
 vendor/zsh/
+vendor/tree-sitter-zsh/

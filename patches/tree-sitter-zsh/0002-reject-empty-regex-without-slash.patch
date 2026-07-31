@@ -1,0 +1,11 @@
+diff --git a/src/scanner.c b/src/scanner.c
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -2109,4 +2109,5 @@ static bool scan(Scanner *scanner, TSLexer *lexer, const bool *valid_symbols) {
+             }
+-            if (valid_symbols[REGEX_NO_SPACE] && !state.advanced_once) {
+-
++            if ((valid_symbols[REGEX_NO_SPACE] ||
++                 valid_symbols[REGEX_NO_SLASH]) && !state.advanced_once) {
++
+ #if DEBUG

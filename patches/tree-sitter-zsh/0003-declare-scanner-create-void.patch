@@ -1,0 +1,13 @@
+diff --git a/src/scanner.c b/src/scanner.c
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -2592,7 +2592,7 @@
+     return false;
+ }
+-
++
+-void *tree_sitter_zsh_external_scanner_create() {
++void *tree_sitter_zsh_external_scanner_create(void) {
+     Scanner *scanner = calloc(1, sizeof(Scanner));
+     UINT32_MAX; // Initialize to invalid position
+     array_init(&scanner->heredocs);

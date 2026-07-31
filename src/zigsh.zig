@@ -1,5 +1,7 @@
 const history = @import("history.zig");
+const highlight = @import("highlight/mod.zig");
 const prompt = @import("prompt.zig");
+const zle_hooks = @import("zle_hooks.zig");
 
 const zsh = @cImport({
     @cInclude("zsh.mdh");
@@ -44,7 +46,28 @@ var module_features = zsh.struct_features{
 pub export fn setup_(_: zsh.Module) callconv(.c) c_int {
     const history_result = history.setup();
     if (history_result != 0) return history_result;
-    return prompt.setup();
+
+    const hooks_result = zle_hooks.setup();
+    if (hooks_result != 0) {
+        history.cleanup();
+        return hooks_result;
+    }
+
+    const prompt_result = prompt.setup();
+    if (prompt_result != 0) {
+        zle_hooks.cleanup();
+        history.cleanup();
+        return prompt_result;
+    }
+
+    const highlight_result = highlight.setup();
+    if (highlight_result != 0) {
+        prompt.cleanup();
+        zle_hooks.cleanup();
+        history.cleanup();
+        return highlight_result;
+    }
+    return 0;
 }
 
 pub export fn features_(module: zsh.Module, out: [*c][*c][*c]u8) callconv(.c) c_int {
@@ -61,7 +84,9 @@ pub export fn boot_(_: zsh.Module) callconv(.c) c_int {
 }
 
 pub export fn cleanup_(module: zsh.Module) callconv(.c) c_int {
+    highlight.cleanup();
     prompt.cleanup();
+    zle_hooks.cleanup();
     history.cleanup();
     return zsh.setfeatureenables(module, &module_features, null);
 }

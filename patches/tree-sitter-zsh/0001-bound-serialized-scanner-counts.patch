@@ -1,0 +1,21 @@
+diff --git a/src/scanner.c b/src/scanner.c
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -361,6 +361,7 @@ static inline void reset(Scanner *scanner) {
+     for (uint32_t i = 0; i < scanner->heredocs.size; i++) {
+         reset_heredoc(array_get(&scanner->heredocs, i));
+     }
++    scanner->heredocs.size = 0;
+ #if DEBUG
+     fprintf(stderr, "DEBUG: Reset done - heredocs.size after=%u %u\n",
+             scanner->heredocs.size, scanner->context_stack.size);
+@@ -372,4 +373,8 @@ static inline void reset(Scanner *scanner) {
+ static unsigned serialize(Scanner *scanner, char *buffer) {
+     uint32_t size = 0;
+-
++    if (scanner->context_stack.size > UINT8_MAX ||
++        scanner->heredocs.size > UINT8_MAX) {
++        return 0;
++    }
++
+     buffer[size++] = (char)scanner->last_glob_paren_depth;

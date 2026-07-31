@@ -5,10 +5,26 @@ const ZshConfiguration = struct {
     prepare: ?*std.Build.Step.Run,
 };
 
+const TreeSitterConfiguration = struct {
+    module: *std.Build.Module,
+    include_path: std.Build.LazyPath,
+    parser_source: std.Build.LazyPath,
+    scanner_source: std.Build.LazyPath,
+    upstream_scanner_source: std.Build.LazyPath,
+    query_source: std.Build.LazyPath,
+    prepare: *std.Build.Step.Run,
+};
+
+const HighlightTools = struct {
+    parser: *std.Build.Step.Compile,
+    upstream_parser: *std.Build.Step.Compile,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zsh = configureZsh(b);
+    const tree_sitter = configureTreeSitter(b, target, optimize);
 
     const zigsh_module = b.createModule(.{
         .root_source_file = b.path("src/zigsh.zig"),
@@ -17,15 +33,65 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     configureZshModule(zigsh_module, zsh.include_path);
+    configureParserModule(zigsh_module, tree_sitter, tree_sitter.scanner_source);
 
     const zigsh = addZigshLibrary(b, zigsh_module);
     dependOnZshPreparation(&zigsh.step, zsh);
+    zigsh.step.dependOn(&tree_sitter.prepare.step);
 
     const install = registerInstall(b, zigsh);
+    const highlight_tools = registerHighlightTools(b, target, optimize, tree_sitter);
 
-    registerCheck(b, zigsh_module, zsh);
-    registerTests(b, target, optimize, &install.step);
+    registerCheck(b, zigsh_module, zsh, tree_sitter);
+    registerTests(b, &install.step, target, optimize, tree_sitter, highlight_tools);
     registerRun(b, &install.step);
+}
+
+fn configureTreeSitter(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) TreeSitterConfiguration {
+    const dependency = b.dependency("tree_sitter", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const prepare = b.addSystemCommand(&.{
+        "sh",
+        "scripts/prepare-tree-sitter-zsh.sh",
+        "vendor/tree-sitter-zsh",
+        "patches/tree-sitter-zsh",
+    });
+
+    return .{
+        .module = dependency.module("tree_sitter"),
+        .include_path = b.path("vendor/tree-sitter-zsh/src"),
+        .parser_source = b.path("vendor/tree-sitter-zsh/src/parser.c"),
+        .scanner_source = b.path("vendor/tree-sitter-zsh/src/scanner.c"),
+        .upstream_scanner_source = b.path("vendor/tree-sitter-zsh/src/scanner.upstream.c"),
+        .query_source = b.path("queries/zsh/highlights.scm"),
+        .prepare = prepare,
+    };
+}
+
+fn configureParserModule(
+    module: *std.Build.Module,
+    tree_sitter: TreeSitterConfiguration,
+    scanner_source: std.Build.LazyPath,
+) void {
+    module.addImport("tree-sitter", tree_sitter.module);
+    module.addIncludePath(tree_sitter.include_path);
+    module.addCSourceFile(.{
+        .file = tree_sitter.parser_source,
+        .flags = &.{"-std=c11"},
+    });
+    module.addCSourceFile(.{
+        .file = scanner_source,
+        .flags = &.{"-std=c11"},
+    });
+    module.addAnonymousImport("zsh-highlights.scm", .{
+        .root_source_file = tree_sitter.query_source,
+    });
 }
 
 fn configureZsh(b: *std.Build) ZshConfiguration {
@@ -89,21 +155,111 @@ fn registerCheck(
     b: *std.Build,
     zigsh_module: *std.Build.Module,
     zsh: ZshConfiguration,
+    tree_sitter: TreeSitterConfiguration,
 ) void {
     // ZLS detects this step and uses it to report compiler diagnostics from
     // the complete import graph without producing or installing an artifact.
     const zigsh_check = addZigshLibrary(b, zigsh_module);
     dependOnZshPreparation(&zigsh_check.step, zsh);
+    zigsh_check.step.dependOn(&tree_sitter.prepare.step);
 
     const check_step = b.step("check", "Check zigsh without emitting a library");
     check_step.dependOn(&zigsh_check.step);
 }
 
-fn registerTests(
+fn registerHighlightTools(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    tree_sitter: TreeSitterConfiguration,
+) HighlightTools {
+    const parser = addHighlightParser(
+        b,
+        "zigsh-highlight-parser",
+        target,
+        optimize,
+        tree_sitter,
+        tree_sitter.scanner_source,
+    );
+    const upstream_parser = addHighlightParser(
+        b,
+        "zigsh-highlight-parser-upstream",
+        target,
+        optimize,
+        tree_sitter,
+        tree_sitter.upstream_scanner_source,
+    );
+
+    const parse = b.addRunArtifact(parser);
+    parse.addArg("parse");
+    if (b.args) |args| parse.addArgs(args);
+    const parse_step = b.step("highlight-parse", "Parse and highlight a Zsh source string");
+    parse_step.dependOn(&parse.step);
+
+    const tree = b.addRunArtifact(parser);
+    tree.addArg("tree");
+    if (b.args) |args| tree.addArgs(args);
+    const tree_step = b.step("highlight-tree", "Print the Zsh syntax tree and highlights");
+    tree_step.dependOn(&tree.step);
+
+    const edits = b.addRunArtifact(parser);
+    edits.addArg("edits");
+    if (b.args) |args| edits.addArgs(args);
+    const edits_step = b.step("highlight-edits", "Apply an incremental Zsh edit sequence");
+    edits_step.dependOn(&edits.step);
+
+    const benchmark = b.addRunArtifact(parser);
+    benchmark.addArg("benchmark");
+    if (b.args) |args| benchmark.addArgs(args);
+    const benchmark_step = b.step("highlight-benchmark", "Benchmark incremental Zsh highlighting");
+    benchmark_step.dependOn(&benchmark.step);
+
+    const benchmark_suite = b.addRunArtifact(parser);
+    benchmark_suite.addArg("benchmark-suite");
+    if (b.args) |args| benchmark_suite.addArgs(args);
+    const benchmark_suite_step = b.step(
+        "highlight-benchmark-suite",
+        "Benchmark the Zsh highlighting corpus and stress buffers",
+    );
+    benchmark_suite_step.dependOn(&benchmark_suite.step);
+
+    const upstream_parse = b.addRunArtifact(upstream_parser);
+    upstream_parse.addArg("parse");
+    if (b.args) |args| upstream_parse.addArgs(args);
+    const upstream_step = b.step("highlight-parse-upstream", "Parse with unmodified tree-sitter-zsh");
+    upstream_step.dependOn(&upstream_parse.step);
+
+    return .{ .parser = parser, .upstream_parser = upstream_parser };
+}
+
+fn addHighlightParser(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    tree_sitter: TreeSitterConfiguration,
+    scanner_source: std.Build.LazyPath,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/highlight_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureParserModule(module, tree_sitter, scanner_source);
+
+    const parser = b.addExecutable(.{ .name = name, .root_module = module });
+    parser.step.dependOn(&tree_sitter.prepare.step);
+    return parser;
+}
+
+fn registerTests(
+    b: *std.Build,
     install_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    tree_sitter: TreeSitterConfiguration,
+    highlight_tools: HighlightTools,
 ) void {
     const test_step = b.step("test", "Load zigsh and exercise its native features");
     registerUnitTest(b, test_step, target, optimize, "src/prompt/git.zig");
@@ -111,6 +267,25 @@ fn registerTests(
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");
+    registerTest(b, test_step, install_step, "test/test-highlighting.zsh");
+    registerTest(b, test_step, install_step, "test/test-highlighting-disabled.zsh");
+
+    const safety_test = b.addSystemCommand(&.{ "zsh", "-f", "test/test-highlight-safety.zsh" });
+    safety_test.addArtifactArg(highlight_tools.parser);
+    safety_test.addArtifactArg(highlight_tools.upstream_parser);
+    test_step.dependOn(&safety_test.step);
+
+    const unit_module = b.createModule(.{
+        .root_source_file = b.path("src/highlight/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureParserModule(unit_module, tree_sitter, tree_sitter.scanner_source);
+    const unit_tests = b.addTest(.{ .root_module = unit_module });
+    unit_tests.step.dependOn(&tree_sitter.prepare.step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
 }
 
 fn registerUnitTest(
