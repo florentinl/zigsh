@@ -15,7 +15,17 @@ pub const CommandKind = enum {
     unknown,
 };
 
-pub const PathKind = enum { none, path, prefix };
+pub const PathKind = enum { none, path, prefix, invalid };
+
+pub fn containsAlias(spans: []const Span) bool {
+    for (spans) |span| {
+        switch (span.style) {
+            .alias, .global_alias, .suffix_alias => return true,
+            else => {},
+        }
+    }
+    return false;
+}
 
 const Token = struct {
     node: ?tree_sitter.Node = null,
@@ -55,11 +65,25 @@ fn Scanner(comptime State: type) type {
         fn visit(self: *Self, node: tree_sitter.Node) !void {
             if (std.mem.eql(u8, node.kind(), "command")) try self.scanCommand(node);
             if (std.mem.eql(u8, node.kind(), "file_redirect")) try self.scanRedirect(node);
+            if (isReservedWord(node.kind())) try self.scanReservedWord(node);
 
             var child_index: u32 = 0;
-            while (child_index < node.namedChildCount()) : (child_index += 1) {
-                try self.visit(node.namedChild(child_index).?);
+            while (child_index < node.childCount()) : (child_index += 1) {
+                try self.visit(node.child(child_index).?);
             }
+        }
+
+        fn scanReservedWord(self: *Self, node: tree_sitter.Node) !void {
+            const token = tokenFor(node);
+            if (self.state.aliasKind(token.text(self.source), true)) |kind| {
+                try self.add(token, switch (kind) {
+                    .regular => .alias,
+                    .global => .global_alias,
+                    .suffix => .suffix_alias,
+                });
+                return;
+            }
+            try self.add(token, styleForCommandKind(self.state.commandKind(token.text(self.source))));
         }
 
         fn scanCommand(self: *Self, node: tree_sitter.Node) !void {
@@ -132,8 +156,6 @@ fn Scanner(comptime State: type) type {
 
         fn scanCommandToken(self: *Self, token: Token, allow_regular_alias: bool) !void {
             const text = token.text(self.source);
-            if (!isLiteralWord(text)) return;
-
             if (self.state.aliasKind(text, allow_regular_alias)) |kind| {
                 try self.add(token, switch (kind) {
                     .regular => .alias,
@@ -143,26 +165,24 @@ fn Scanner(comptime State: type) type {
                 return;
             }
 
+            if (!isLiteralWord(text)) return;
+
             const command_kind = self.state.commandKind(text);
             if (command_kind == .unknown) {
                 switch (self.state.pathKind(text, token.end_byte == self.source.len, true)) {
+                    .path => {
+                        try self.add(token, .external_command);
+                        return;
+                    },
                     .prefix => {
                         try self.add(token, .path_prefix);
                         return;
                     },
-                    .none, .path => {},
+                    .none, .invalid => {},
                 }
             }
 
-            try self.add(token, switch (command_kind) {
-                .reserved_word => .keyword,
-                .shell_function => .shell_function,
-                .builtin => .builtin,
-                .hashed_command => .hashed_command,
-                .external_command => .external_command,
-                .auto_directory => .auto_directory,
-                .unknown => .unknown_command,
-            });
+            try self.add(token, styleForCommandKind(command_kind));
         }
 
         fn scanExpansions(self: *Self, token: Token) !void {
@@ -184,6 +204,7 @@ fn Scanner(comptime State: type) type {
                 .none => {},
                 .path => try self.add(token, .path),
                 .prefix => try self.add(token, .path_prefix),
+                .invalid => try self.add(token, .unknown_token),
             }
         }
 
@@ -193,13 +214,28 @@ fn Scanner(comptime State: type) type {
                 const field_name = node.fieldNameForChild(child_index) orelse continue;
                 if (!std.mem.eql(u8, field_name, "destination")) continue;
                 const destination = tokenFor(node.child(child_index).?);
+                if (self.redirectTargetStyle(node, destination)) |style| {
+                    try self.add(destination, style);
+                    continue;
+                }
                 try self.scanExpansions(destination);
                 switch (self.state.pathKind(destination.text(self.source), destination.end_byte == self.source.len, false)) {
                     .none => {},
                     .path => try self.add(destination, .path),
                     .prefix => try self.add(destination, .path_prefix),
+                    .invalid => try self.add(destination, .unknown_token),
                 }
             }
+        }
+
+        fn redirectTargetStyle(self: *Self, redirect: tree_sitter.Node, destination: Token) ?Style {
+            const operator = self.source[redirect.startByte()..destination.start_byte];
+            if (!std.mem.endsWith(u8, operator, "&")) return null;
+
+            const target = destination.text(self.source);
+            if (std.mem.eql(u8, target, "p") or std.mem.eql(u8, target, "-")) return .redirection;
+            if (isDecimal(target)) return .plain;
+            return null;
         }
 
         fn scanHistory(self: *Self, node: tree_sitter.Node) !void {
@@ -368,6 +404,32 @@ fn isLiteralWord(word: []const u8) bool {
     return true;
 }
 
+fn isReservedWord(kind: []const u8) bool {
+    inline for (reserved_words) |word| {
+        if (std.mem.eql(u8, kind, word)) return true;
+    }
+    return false;
+}
+
+const reserved_words = [_][]const u8{
+    "case",  "coproc",    "do",     "done",   "elif",    "else",     "end",
+    "esac",  "export",    "fi",     "for",    "foreach", "function", "if",
+    "in",    "nocorrect", "repeat", "select", "then",    "time",     "until",
+    "while", "unset",
+};
+
+fn styleForCommandKind(kind: CommandKind) Style {
+    return switch (kind) {
+        .reserved_word => .keyword,
+        .shell_function => .shell_function,
+        .builtin => .builtin,
+        .hashed_command => .hashed_command,
+        .external_command => .external_command,
+        .auto_directory => .auto_directory,
+        .unknown => .unknown_command,
+    };
+}
+
 fn isAssignment(word: []const u8) bool {
     const equal = std.mem.indexOfScalar(u8, word, '=') orelse return false;
     if (equal == 0) return false;
@@ -375,6 +437,14 @@ fn isAssignment(word: []const u8) bool {
     if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
     for (name[1..]) |byte| {
         if (!(std.ascii.isAlphanumeric(byte) or byte == '_')) return false;
+    }
+    return true;
+}
+
+fn isDecimal(word: []const u8) bool {
+    if (word.len == 0) return false;
+    for (word) |byte| {
+        if (!std.ascii.isDigit(byte)) return false;
     }
     return true;
 }

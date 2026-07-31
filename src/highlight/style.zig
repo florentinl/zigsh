@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const Style = enum {
+    plain,
     path,
     path_prefix,
     string,
@@ -22,15 +23,17 @@ pub const Style = enum {
     globbing,
     history_expansion,
     variable,
+    unknown_token,
     unknown_command,
     comment,
     parse_error,
 
     pub fn priority(self: Style) u8 {
         return switch (self) {
+            .plain => 106,
             .path => 70,
             .path_prefix => 71,
-            .punctuation => 20,
+            .punctuation => 105,
             .operator => 30,
             .number => 40,
             .redirection => 45,
@@ -39,6 +42,7 @@ pub const Style = enum {
             .alias,
             .suffix_alias,
             .global_alias,
+            => 126,
             .shell_function,
             .builtin,
             .hashed_command,
@@ -52,6 +56,7 @@ pub const Style = enum {
             .variable => 110,
             .history_expansion => 115,
             .comment => 120,
+            .unknown_token => 125,
             .parse_error => 130,
         };
     }

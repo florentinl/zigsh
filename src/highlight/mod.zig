@@ -1,4 +1,5 @@
 const std = @import("std");
+const alias_expansion = @import("alias_expansion.zig");
 const semantic = @import("semantic.zig");
 const spans = @import("span.zig");
 const zle_hooks = @import("../zle_hooks.zig");
@@ -17,6 +18,7 @@ pub const Span = @import("span.zig").Span;
 pub const Style = @import("style.zig").Style;
 
 var engine: ?Engine = null;
+var alias_engine: ?alias_expansion.Engine = null;
 var active = false;
 var regions_current = false;
 
@@ -24,13 +26,22 @@ pub fn setup() c_int {
     if (active or highlightingDisabled()) return 0;
 
     engine = Engine.init(std.heap.c_allocator) catch return 1;
+    alias_engine = alias_expansion.Engine.init(std.heap.c_allocator) catch {
+        engine.?.deinit();
+        engine = null;
+        return 1;
+    };
     regions.setup() catch {
+        alias_engine.?.deinit();
+        alias_engine = null;
         engine.?.deinit();
         engine = null;
         regions.resetTheme();
         return 1;
     };
     zle_hooks.add(linePreRedraw) catch {
+        alias_engine.?.deinit();
+        alias_engine = null;
         engine.?.deinit();
         engine = null;
         regions.resetTheme();
@@ -45,6 +56,8 @@ pub fn cleanup() void {
     if (!active) return;
     zle_hooks.remove(linePreRedraw);
     regions.cleanup();
+    if (alias_engine) |*active_alias_engine| active_alias_engine.deinit();
+    alias_engine = null;
     if (engine) |*active_engine| active_engine.deinit();
     engine = null;
     active = false;
@@ -103,13 +116,34 @@ fn linePreRedraw() c_int {
     };
     defer std.heap.c_allocator.free(semantic_spans);
 
-    const candidates = std.heap.c_allocator.alloc(Span, result.spans.len + semantic_spans.len) catch {
+    const expanded_spans = if (semantic.containsAlias(semantic_spans)) expanded: {
+        const active_alias_engine = if (alias_engine) |*value| value else {
+            clearRegions();
+            return 0;
+        };
+        break :expanded active_alias_engine.highlight(snapshot.bytes, &state) catch {
+            clearRegions();
+            return 0;
+        };
+    } else null;
+    defer if (expanded_spans) |owned| std.heap.c_allocator.free(owned);
+    const expanded_span_count = if (expanded_spans) |owned| owned.len else 0;
+
+    const candidates = std.heap.c_allocator.alloc(
+        Span,
+        result.spans.len + semantic_spans.len + expanded_span_count,
+    ) catch {
         clearRegions();
         return 0;
     };
     defer std.heap.c_allocator.free(candidates);
-    @memcpy(candidates[0..result.spans.len], result.spans);
-    @memcpy(candidates[result.spans.len..], semantic_spans);
+    const syntax_end = result.spans.len;
+    const semantic_end = syntax_end + semantic_spans.len;
+    @memcpy(candidates[0..syntax_end], result.spans);
+    @memcpy(candidates[syntax_end..semantic_end], semantic_spans);
+    if (expanded_spans) |owned| {
+        @memcpy(candidates[semantic_end..], owned);
+    }
 
     const composed = spans.compose(std.heap.c_allocator, @intCast(snapshot.bytes.len), candidates) catch {
         clearRegions();

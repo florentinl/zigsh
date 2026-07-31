@@ -27,6 +27,7 @@ pub fn setup() error{ UnsupportedZshVersion, InvalidStyle }!void {
 
 fn styleSpec(style: Style) [:0]const u8 {
     return switch (style) {
+        .plain => "none",
         .path, .path_prefix => "underline",
         .string => "fg=yellow",
         .punctuation, .number => "fg=magenta",
@@ -42,7 +43,7 @@ fn styleSpec(style: Style) [:0]const u8 {
         => "fg=green",
         .suffix_alias, .precommand, .auto_directory => "fg=green,underline",
         .global_alias, .variable => "fg=cyan",
-        .unknown_command, .parse_error => "fg=red,bold",
+        .unknown_token, .unknown_command, .parse_error => "fg=red,bold",
         .comment => "fg=black,bold",
     };
 }

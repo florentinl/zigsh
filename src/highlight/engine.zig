@@ -2,6 +2,8 @@ const std = @import("std");
 const tree_sitter = @import("tree-sitter");
 const clock = @import("clock.zig");
 const edits = @import("edit.zig");
+const globbing = @import("globbing.zig");
+const quotes = @import("quotes.zig");
 const spans = @import("span.zig");
 const Span = spans.Span;
 const Style = @import("style.zig").Style;
@@ -95,7 +97,7 @@ pub const Engine = struct {
         const parse_end = clock.nowNanoseconds();
 
         const query_start = parse_end;
-        var captures = try self.collectCaptures(tree.rootNode());
+        var captures = try self.collectCaptures(tree.rootNode(), source);
         defer captures.deinit(self.allocator);
         const query_end = clock.nowNanoseconds();
 
@@ -155,7 +157,7 @@ pub const Engine = struct {
         return next_tree;
     }
 
-    fn collectCaptures(self: *Engine, root: tree_sitter.Node) !std.ArrayList(Span) {
+    fn collectCaptures(self: *Engine, root: tree_sitter.Node, source: []const u8) !std.ArrayList(Span) {
         var captures = std.ArrayList(Span).empty;
         errdefer captures.deinit(self.allocator);
 
@@ -166,11 +168,37 @@ pub const Engine = struct {
             const capture = entry[1].captures[entry[0]];
             const capture_name = self.query.captureNameForId(capture.index) orelse continue;
             const style = Style.fromCapture(capture_name) orelse continue;
+            const start_byte = capture.node.startByte();
+            const end_byte = capture.node.endByte();
+            if (style == .globbing) {
+                try globbing.appendOperators(
+                    &captures,
+                    self.allocator,
+                    source,
+                    start_byte,
+                    end_byte,
+                );
+                continue;
+            }
+            if (style == .parse_error and try quotes.appendUnclosedQuote(
+                &captures,
+                self.allocator,
+                source,
+                start_byte,
+                end_byte,
+            )) continue;
             try captures.append(self.allocator, .{
-                .start_byte = capture.node.startByte(),
-                .end_byte = capture.node.endByte(),
+                .start_byte = start_byte,
+                .end_byte = end_byte,
                 .style = style,
             });
+            if (style == .string) try quotes.appendAnsiCEscapes(
+                &captures,
+                self.allocator,
+                source,
+                start_byte,
+                end_byte,
+            );
         }
 
         if (self.query_cursor.didExceedMatchLimit()) return error.QueryMatchLimitExceeded;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const AliasEngine = @import("alias_expansion.zig").Engine;
 const corpus = @import("corpus.zig");
 const Engine = @import("engine.zig").Engine;
 const max_capture_count = @import("engine.zig").max_capture_count;
@@ -74,6 +75,49 @@ test "history expansion scanner respects quoting and escaping" {
         if (span.style == .history_expansion) history_span_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), history_span_count);
+}
+
+test "aliases take precedence over reserved words" {
+    const source = "time external";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "time", .alias);
+    try expectNoSemanticSpan(source, actual, "time", .keyword);
+}
+
+test "aliases may contain parameter syntax" {
+    const source = "$foo";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "$foo", .alias);
+}
+
+test "alias expansion projects changed command context onto original tokens" {
+    const source = "separator missing; redirect output; print PIPE external; cycle-a";
+    var alias_engine = try AliasEngine.init(std.testing.allocator);
+    defer alias_engine.deinit();
+
+    const state = FakeSemanticState{};
+    const actual = try alias_engine.highlight(source, &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "missing", .unknown_command);
+    try expectSemanticSpan(source, actual, "output", .path);
+    try expectSemanticSpan(source, actual, "external", .external_command);
 }
 
 test "baseline corpus parses within structural limits" {
@@ -207,10 +251,27 @@ fn expectSemanticSpan(source: []const u8, spans: []const Span, text: []const u8,
     return error.SemanticSpanNotFound;
 }
 
+fn expectNoSemanticSpan(source: []const u8, spans: []const Span, text: []const u8, style: Style) !void {
+    const start = std.mem.indexOf(u8, source, text) orelse return error.TextNotFound;
+    for (spans) |span| {
+        if (span.start_byte == start and span.end_byte == start + text.len and span.style == style) {
+            return error.UnexpectedSemanticSpan;
+        }
+    }
+}
+
 const FakeSemanticState = struct {
     pub fn aliasKind(_: *const FakeSemanticState, word: []const u8, command_position: bool) ?semantic.AliasKind {
         if (std.mem.eql(u8, word, "G")) return .global;
+        if (std.mem.eql(u8, word, "PIPE")) return .global;
         if (command_position and std.mem.eql(u8, word, "ll")) return .regular;
+        if (command_position and
+            (std.mem.eql(u8, word, "separator") or
+                std.mem.eql(u8, word, "redirect") or
+                std.mem.eql(u8, word, "cycle-a") or
+                std.mem.eql(u8, word, "cycle-b") or
+                std.mem.eql(u8, word, "time") or
+                std.mem.eql(u8, word, "$foo"))) return .regular;
         if (command_position and std.mem.endsWith(u8, word, ".txt")) return .suffix;
         return null;
     }
@@ -231,8 +292,31 @@ const FakeSemanticState = struct {
         return std.mem.eql(u8, word, "ll");
     }
 
+    pub fn aliasExpansion(
+        _: *const FakeSemanticState,
+        allocator: std.mem.Allocator,
+        word: []const u8,
+        _: semantic.AliasKind,
+    ) !?[]u8 {
+        const expansion = if (std.mem.eql(u8, word, "separator"))
+            "print ok;"
+        else if (std.mem.eql(u8, word, "redirect"))
+            "print hi >"
+        else if (std.mem.eql(u8, word, "PIPE"))
+            "|"
+        else if (std.mem.eql(u8, word, "cycle-a"))
+            "cycle-b"
+        else if (std.mem.eql(u8, word, "cycle-b"))
+            "cycle-a"
+        else if (std.mem.eql(u8, word, "$foo"))
+            "print alias"
+        else
+            return null;
+        return try allocator.dupe(u8, expansion);
+    }
+
     pub fn pathKind(_: *const FakeSemanticState, word: []const u8, _: bool, _: bool) semantic.PathKind {
-        return if (std.mem.eql(u8, word, "README.md")) .path else .none;
+        return if (std.mem.eql(u8, word, "README.md") or std.mem.eql(u8, word, "output")) .path else .none;
     }
 
     pub fn historyEnabled(_: *const FakeSemanticState) bool {
@@ -266,6 +350,14 @@ test "semantic scanner releases every allocator-owned partial result" {
     );
 }
 
+test "alias expansion releases every allocator-owned partial result" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runAliasExpansionAllocationSequence,
+        .{},
+    );
+}
+
 fn runHighlightAllocationSequence(allocator: std.mem.Allocator) !void {
     var engine = try Engine.init(allocator);
     defer engine.deinit();
@@ -286,4 +378,14 @@ fn runSemanticAllocationSequence(allocator: std.mem.Allocator) !void {
     const state = FakeSemanticState{};
     const semantic_spans = try semantic.highlight(allocator, source, try engine.rootNode(), &state);
     defer allocator.free(semantic_spans);
+}
+
+fn runAliasExpansionAllocationSequence(allocator: std.mem.Allocator) !void {
+    const source = "separator missing; redirect output; print PIPE external; cycle-a";
+    var alias_engine = try AliasEngine.init(allocator);
+    defer alias_engine.deinit();
+
+    const state = FakeSemanticState{};
+    const projected = try alias_engine.highlight(source, &state);
+    defer allocator.free(projected);
 }

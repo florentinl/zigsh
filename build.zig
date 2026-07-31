@@ -44,6 +44,7 @@ pub fn build(b: *std.Build) void {
 
     registerCheck(b, zigsh_module, zsh, tree_sitter);
     registerTests(b, &install.step, target, optimize, tree_sitter, highlight_tools);
+    registerDifferentialTest(b, &install.step);
     registerRun(b, &install.step);
 }
 
@@ -315,6 +316,18 @@ fn registerTest(
     const run = b.addSystemCommand(&.{ "zsh", "-f", path });
     run.step.dependOn(install_step);
     test_step.dependOn(&run.step);
+}
+
+fn registerDifferentialTest(b: *std.Build, install_step: *std.Build.Step) void {
+    const run = b.addSystemCommand(&.{ "zsh", "-f", "test/compare-highlighting.zsh" });
+    if (b.args) |args| run.addArgs(args);
+    run.step.dependOn(install_step);
+
+    const step = b.step(
+        "highlight-differential",
+        "Compare semantic regions with a zsh-syntax-highlighting checkout",
+    );
+    step.dependOn(&run.step);
 }
 
 fn registerRun(b: *std.Build, install_step: *std.Build.Step) void {

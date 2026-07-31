@@ -24,6 +24,11 @@
   (variable_ref)
 ] @variable
 
+(
+  (expansion) @variable
+  (#match? @variable "^\\$\\{")
+)
+
 [
   (number)
   (file_descriptor)
