@@ -103,6 +103,7 @@ fn registerTests(b: *std.Build, install_step: *std.Build.Step) void {
     const test_step = b.step("test", "Load zigsh and exercise its native features");
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
+    registerTest(b, test_step, install_step, "test/test-prompt.zsh");
 }
 
 fn registerTest(
