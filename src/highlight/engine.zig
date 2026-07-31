@@ -125,6 +125,11 @@ pub const Engine = struct {
         return tree.rootNode().toSexp(allocator);
     }
 
+    pub fn rootNode(self: Engine) error{NoTree}!tree_sitter.Node {
+        const tree = self.tree orelse return error.NoTree;
+        return tree.rootNode();
+    }
+
     fn parse(self: *Engine, source: []const u8) !*tree_sitter.Tree {
         if (self.tree != null and std.mem.eql(u8, self.source, source)) return self.tree.?;
 

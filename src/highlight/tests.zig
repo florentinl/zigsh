@@ -2,8 +2,10 @@ const std = @import("std");
 const corpus = @import("corpus.zig");
 const Engine = @import("engine.zig").Engine;
 const max_capture_count = @import("engine.zig").max_capture_count;
+const semantic = @import("semantic.zig");
 const Snapshot = @import("snapshot.zig").Snapshot;
 const Span = @import("span.zig").Span;
+const Style = @import("style.zig").Style;
 
 test {
     _ = @import("edit.zig");
@@ -25,6 +27,53 @@ test "engine produces structural highlights" {
     try expectStyle(result.spans, .string);
     try expectStyle(result.spans, .variable);
     try expectStyle(result.spans, .comment);
+}
+
+test "semantic scanner classifies commands, precommands, aliases, and paths" {
+    const source = "ll README.md; sudo -u root print G !42; helper; reserved; hashed; external; auto-dir; snapshot.txt; missing";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "ll", .alias);
+    try expectSemanticSpan(source, actual, "README.md", .path);
+    try expectSemanticSpan(source, actual, "sudo", .precommand);
+    try expectSemanticSpan(source, actual, "print", .builtin);
+    try expectSemanticSpan(source, actual, "G", .global_alias);
+    try expectSemanticSpan(source, actual, "!42", .history_expansion);
+    try expectSemanticSpan(source, actual, "helper", .shell_function);
+    try expectSemanticSpan(source, actual, "reserved", .keyword);
+    try expectSemanticSpan(source, actual, "hashed", .hashed_command);
+    try expectSemanticSpan(source, actual, "external", .external_command);
+    try expectSemanticSpan(source, actual, "auto-dir", .auto_directory);
+    try expectSemanticSpan(source, actual, "snapshot.txt", .suffix_alias);
+    try expectSemanticSpan(source, actual, "missing", .unknown_command);
+}
+
+test "history expansion scanner respects quoting and escaping" {
+    const source = "print foo!$ \"!42\" '!no' \\!escaped";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "!$", .history_expansion);
+    try expectSemanticSpan(source, actual, "!42", .history_expansion);
+
+    var history_span_count: usize = 0;
+    for (actual) |span| {
+        if (span.style == .history_expansion) history_span_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), history_span_count);
 }
 
 test "baseline corpus parses within structural limits" {
@@ -143,12 +192,57 @@ test "repeated incremental edits retain stable offsets" {
     }
 }
 
-fn expectStyle(spans: []const Span, expected: @import("style.zig").Style) !void {
+fn expectStyle(spans: []const Span, expected: Style) !void {
     for (spans) |span| {
         if (span.style == expected) return;
     }
     return error.StyleNotFound;
 }
+
+fn expectSemanticSpan(source: []const u8, spans: []const Span, text: []const u8, style: Style) !void {
+    const start = std.mem.indexOf(u8, source, text) orelse return error.TextNotFound;
+    for (spans) |span| {
+        if (span.start_byte == start and span.end_byte == start + text.len and span.style == style) return;
+    }
+    return error.SemanticSpanNotFound;
+}
+
+const FakeSemanticState = struct {
+    pub fn aliasKind(_: *const FakeSemanticState, word: []const u8, command_position: bool) ?semantic.AliasKind {
+        if (std.mem.eql(u8, word, "G")) return .global;
+        if (command_position and std.mem.eql(u8, word, "ll")) return .regular;
+        if (command_position and std.mem.endsWith(u8, word, ".txt")) return .suffix;
+        return null;
+    }
+
+    pub fn commandKind(_: *const FakeSemanticState, word: []const u8) semantic.CommandKind {
+        if (std.mem.eql(u8, word, "sudo") or
+            std.mem.eql(u8, word, "print") or
+            std.mem.eql(u8, word, "ll")) return .builtin;
+        if (std.mem.eql(u8, word, "helper")) return .shell_function;
+        if (std.mem.eql(u8, word, "reserved")) return .reserved_word;
+        if (std.mem.eql(u8, word, "hashed")) return .hashed_command;
+        if (std.mem.eql(u8, word, "external")) return .external_command;
+        if (std.mem.eql(u8, word, "auto-dir")) return .auto_directory;
+        return .unknown;
+    }
+
+    pub fn regularAliasExpandsNext(_: *const FakeSemanticState, word: []const u8) bool {
+        return std.mem.eql(u8, word, "ll");
+    }
+
+    pub fn pathKind(_: *const FakeSemanticState, word: []const u8, _: bool, _: bool) semantic.PathKind {
+        return if (std.mem.eql(u8, word, "README.md")) .path else .none;
+    }
+
+    pub fn historyEnabled(_: *const FakeSemanticState) bool {
+        return true;
+    }
+
+    pub fn historyCharacter(_: *const FakeSemanticState) u8 {
+        return '!';
+    }
+};
 
 test "UTF-8 snapshots expose character offsets for regions" {
     var snapshot = try Snapshot.fromUtf8(std.testing.allocator, "echo \"é🙂\"");
@@ -164,6 +258,14 @@ test "engine releases every allocator-owned partial result" {
     );
 }
 
+test "semantic scanner releases every allocator-owned partial result" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runSemanticAllocationSequence,
+        .{},
+    );
+}
+
 fn runHighlightAllocationSequence(allocator: std.mem.Allocator) !void {
     var engine = try Engine.init(allocator);
     defer engine.deinit();
@@ -172,4 +274,16 @@ fn runHighlightAllocationSequence(allocator: std.mem.Allocator) !void {
     first.deinit(allocator);
     var second = try engine.highlight("if true; then echo \"$USER\"; fi");
     defer second.deinit(allocator);
+}
+
+fn runSemanticAllocationSequence(allocator: std.mem.Allocator) !void {
+    const source = "ll README.md; sudo -u root print G !42; helper; reserved; hashed; external; auto-dir; snapshot.txt; missing";
+    var engine = try Engine.init(allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(allocator);
+
+    const state = FakeSemanticState{};
+    const semantic_spans = try semantic.highlight(allocator, source, try engine.rootNode(), &state);
+    defer allocator.free(semantic_spans);
 }

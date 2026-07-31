@@ -1,6 +1,9 @@
 const std = @import("std");
+const semantic = @import("semantic.zig");
+const spans = @import("span.zig");
 const zle_hooks = @import("../zle_hooks.zig");
 const regions = @import("zsh59_regions.zig");
+const zsh_state = @import("zsh_state.zig");
 
 const zsh = @cImport({
     @cInclude("Zle/zle.mdh");
@@ -84,6 +87,36 @@ fn linePreRedraw() c_int {
         return 0;
     };
     defer result.deinit(std.heap.c_allocator);
+
+    const state = zsh_state.State{ .allocator = std.heap.c_allocator };
+    const semantic_spans = semantic.highlight(
+        std.heap.c_allocator,
+        snapshot.bytes,
+        active_engine.rootNode() catch {
+            clearRegions();
+            return 0;
+        },
+        &state,
+    ) catch {
+        clearRegions();
+        return 0;
+    };
+    defer std.heap.c_allocator.free(semantic_spans);
+
+    const candidates = std.heap.c_allocator.alloc(Span, result.spans.len + semantic_spans.len) catch {
+        clearRegions();
+        return 0;
+    };
+    defer std.heap.c_allocator.free(candidates);
+    @memcpy(candidates[0..result.spans.len], result.spans);
+    @memcpy(candidates[result.spans.len..], semantic_spans);
+
+    const composed = spans.compose(std.heap.c_allocator, @intCast(snapshot.bytes.len), candidates) catch {
+        clearRegions();
+        return 0;
+    };
+    std.heap.c_allocator.free(result.spans);
+    result.spans = composed;
 
     regions.apply(snapshot, result.spans) catch {
         clearRegions();

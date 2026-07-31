@@ -10,29 +10,41 @@ const zsh = @cImport({
 const special_region_count: usize = zsh.N_SPECIAL_HIGHLIGHTS;
 const style_count = @typeInfo(Style).@"enum".fields.len;
 
-const style_specs: [style_count][:0]const u8 = .{
-    "fg=yellow",
-    "fg=magenta",
-    "fg=blue",
-    "fg=magenta",
-    "fg=yellow,bold",
-    "fg=green",
-    "fg=cyan",
-    "fg=black,bold",
-    "fg=red,bold",
-};
-
 var attributes: [style_count]zsh.zattr = @splat(0);
 var theme_ready = false;
 
 pub fn setup() error{ UnsupportedZshVersion, InvalidStyle }!void {
     try requireZsh59();
 
-    for (style_specs, 0..) |spec, index| {
+    for (0..style_count) |index| {
+        const style: Style = @enumFromInt(index);
+        const spec = styleSpec(style);
         const remaining = zsh.match_highlight(spec.ptr, &attributes[index]);
         if (remaining[0] != 0) return error.InvalidStyle;
     }
     theme_ready = true;
+}
+
+fn styleSpec(style: Style) [:0]const u8 {
+    return switch (style) {
+        .path, .path_prefix => "underline",
+        .string => "fg=yellow",
+        .punctuation, .number => "fg=magenta",
+        .operator, .globbing, .history_expansion => "fg=blue",
+        .redirection => "fg=yellow",
+        .keyword => "fg=yellow",
+        .function,
+        .alias,
+        .shell_function,
+        .builtin,
+        .hashed_command,
+        .external_command,
+        => "fg=green",
+        .suffix_alias, .precommand, .auto_directory => "fg=green,underline",
+        .global_alias, .variable => "fg=cyan",
+        .unknown_command, .parse_error => "fg=red,bold",
+        .comment => "fg=black,bold",
+    };
 }
 
 pub fn cleanup() void {

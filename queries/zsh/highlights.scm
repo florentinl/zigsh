@@ -15,6 +15,8 @@
 (command_name
   (word) @function)
 
+(glob_pattern) @globbing
+
 [
   (variable_name)
   (simple_variable_name)
@@ -63,8 +65,6 @@
   ">&"
   "&>"
   "&>>"
-  "="
-  "+="
   "=="
   "!="
   "=~"
@@ -84,5 +84,43 @@
   ";"
   ";;"
 ] @punctuation
+
+(file_redirect
+  [
+    "<"
+    ">"
+    ">>"
+    "&>"
+    "&>>"
+    "<&"
+    ">&"
+    ">|"
+    "<&-"
+    ">&-"
+  ] @redirection)
+
+(herestring_redirect "<<<" @redirection)
+
+(heredoc_redirect
+  [
+    "<<"
+    "<<-"
+  ] @redirection)
+
+(command_substitution
+  [
+    "$("
+    "`"
+  ] @punctuation)
+
+(process_substitution ["=(" ">(" "<("] @punctuation)
+
+(arithmetic_expansion
+  [
+    "$(("
+    "(("
+    "))"
+    "$["
+  ] @punctuation)
 
 (ERROR) @error

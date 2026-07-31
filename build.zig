@@ -268,6 +268,7 @@ fn registerTests(
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");
     registerTest(b, test_step, install_step, "test/test-highlighting.zsh");
+    registerTest(b, test_step, install_step, "test/test-highlighting-semantics.zsh");
     registerTest(b, test_step, install_step, "test/test-highlighting-disabled.zsh");
 
     const safety_test = b.addSystemCommand(&.{ "zsh", "-f", "test/test-highlight-safety.zsh" });
