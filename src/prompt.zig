@@ -8,7 +8,9 @@ const zle = @cImport({
 });
 
 const config = @import("prompt/config.zig");
+const clock = @import("prompt/clock.zig");
 const context = @import("prompt/context.zig");
+pub const metrics = @import("prompt/metrics.zig");
 const segment = @import("prompt/segment.zig");
 const template = @import("prompt/template.zig");
 const character = @import("prompt/segments/character.zig");
@@ -81,15 +83,29 @@ fn redrawBeforeZle() c_int {
 }
 
 fn renderPrompt() callconv(.c) void {
+    const render_started = clock.nowNanoseconds();
+    var snapshot: metrics.Snapshot = .{};
+    defer snapshot.deinit();
+
+    const context_started = clock.nowNanoseconds();
     var current = Context.init() catch return;
     defer current.deinit();
+    snapshot.context_ns = clock.elapsedSince(context_started);
+    snapshot.git_ns = current.git_duration_ns;
 
     var values: [segment_count]segment.Output = [_]segment.Output{.{}} ** segment_count;
     defer for (&values) |*value| value.deinit(allocator);
     for (definitions) |definition| {
+        const segment_started = clock.nowNanoseconds();
         values[@intFromEnum(definition.name)] = definition.render(allocator, &current) catch return;
+        snapshot.recordSegment(
+            definition.name,
+            clock.elapsedSince(segment_started),
+            values[@intFromEnum(definition.name)].text,
+        ) catch return;
     }
 
+    const layout_started = clock.nowNanoseconds();
     const columns = terminalColumns();
     fitToWidth(&values, columns);
 
@@ -114,6 +130,9 @@ fn renderPrompt() callconv(.c) void {
     assignPrompt("PROMPT", prompt.items);
     assignPrompt("RPROMPT", rprompt.items);
     last_columns = columns;
+    snapshot.layout_ns = clock.elapsedSince(layout_started);
+    snapshot.total_ns = clock.elapsedSince(render_started);
+    metrics.replace(&snapshot);
 }
 
 fn fitToWidth(values: *[segment_count]segment.Output, columns: usize) void {
