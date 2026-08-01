@@ -21,6 +21,7 @@ const git_status = @import("prompt/segments/git_status.zig");
 const os = @import("prompt/segments/os.zig");
 const status = @import("prompt/segments/status.zig");
 const sudo = @import("prompt/segments/sudo.zig");
+const zle_hooks = @import("zle_hooks.zig");
 
 const allocator = std.heap.c_allocator;
 const Context = context.Context;
@@ -40,7 +41,6 @@ const definitions = [_]segment.Definition{
 };
 
 var preprompt_registered = false;
-var redraw_widget: zle.Widget = null;
 var last_columns: usize = 0;
 var redraw_in_progress = false;
 
@@ -53,23 +53,15 @@ pub fn setup() c_int {
     zsh.addprepromptfn(renderPrompt);
     preprompt_registered = true;
 
-    redraw_widget = zle.addzlefunction(
-        @constCast("zle-line-pre-redraw"),
-        redrawBeforeZle,
-        0,
-    );
-    if (redraw_widget == null) {
+    zle_hooks.add(redrawBeforeZle) catch {
         cleanup();
         return 1;
-    }
+    };
     return 0;
 }
 
 pub fn cleanup() void {
-    if (redraw_widget != null) {
-        zle.deletezlefunction(redraw_widget);
-        redraw_widget = null;
-    }
+    zle_hooks.remove(redrawBeforeZle);
     if (preprompt_registered) {
         zsh.delprepromptfn(renderPrompt);
         preprompt_registered = false;
@@ -77,7 +69,7 @@ pub fn cleanup() void {
     last_columns = 0;
 }
 
-fn redrawBeforeZle(_: [*c][*c]u8) callconv(.c) c_int {
+fn redrawBeforeZle() c_int {
     const columns = terminalColumns();
     if (redraw_in_progress or columns == last_columns) return 0;
 
