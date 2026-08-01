@@ -4,6 +4,7 @@ const clock = @import("clock.zig");
 const edits = @import("edit.zig");
 const globbing = @import("globbing.zig");
 const quotes = @import("quotes.zig");
+const recovery = @import("recovery.zig");
 const spans = @import("span.zig");
 const Span = spans.Span;
 const Style = @import("style.zig").Style;
@@ -200,6 +201,8 @@ pub const Engine = struct {
                 end_byte,
             );
         }
+
+        try recovery.append(&captures, self.allocator, source);
 
         if (self.query_cursor.didExceedMatchLimit()) return error.QueryMatchLimitExceeded;
         return captures;

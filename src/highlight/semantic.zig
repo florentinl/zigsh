@@ -1,5 +1,6 @@
 const std = @import("std");
 const tree_sitter = @import("tree-sitter");
+const redirection = @import("redirection.zig");
 const Span = @import("span.zig").Span;
 const Style = @import("style.zig").Style;
 
@@ -21,6 +22,16 @@ pub fn containsAlias(spans: []const Span) bool {
     for (spans) |span| {
         switch (span.style) {
             .alias, .global_alias, .suffix_alias => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+pub fn requiresVirtualExpansion(spans: []const Span) bool {
+    for (spans) |span| {
+        switch (span.style) {
+            .alias, .global_alias, .suffix_alias, .variable => return true,
             else => {},
         }
     }
@@ -50,6 +61,9 @@ pub fn highlight(
     };
     errdefer scanner.spans.deinit(allocator);
     try scanner.visit(root);
+    try scanner.scanUnclosedBackquotes();
+    try scanner.scanAnonymousFunctionBodies();
+    try scanner.scanAssignmentBeforeReservedWord();
     return scanner.spans.toOwnedSlice(allocator);
 }
 
@@ -165,11 +179,16 @@ fn Scanner(comptime State: type) type {
                 return;
             }
 
-            if (!isLiteralWord(text)) return;
+            if (isSimpleParameterExpression(text)) {
+                try self.add(token, .variable);
+                return;
+            }
 
-            const command_kind = self.state.commandKind(text);
+            const command = literalCommandWord(text) orelse return;
+
+            const command_kind = self.state.commandKind(command);
             if (command_kind == .unknown) {
-                switch (self.state.pathKind(text, token.end_byte == self.source.len, true)) {
+                switch (self.state.pathKind(command, token.end_byte == self.source.len, true)) {
                     .path => {
                         try self.add(token, .external_command);
                         return;
@@ -209,6 +228,9 @@ fn Scanner(comptime State: type) type {
         }
 
         fn scanRedirect(self: *Self, node: tree_sitter.Node) !void {
+            if (redirection.operatorSpan(self.source, node.startByte(), node.endByte())) |operator| {
+                try self.spans.append(self.allocator, operator);
+            }
             var child_index: u32 = 0;
             while (child_index < node.childCount()) : (child_index += 1) {
                 const field_name = node.fieldNameForChild(child_index) orelse continue;
@@ -256,6 +278,145 @@ fn Scanner(comptime State: type) type {
                 });
                 index = end - 1;
             }
+        }
+
+        fn scanUnclosedBackquotes(self: *Self) !void {
+            var opening: usize = 0;
+            while (opening < self.source.len) : (opening += 1) {
+                if (self.source[opening] != '`' or isEscaped(self.source, opening)) continue;
+                if (closingBackquote(self.source, opening + 1) != null) continue;
+
+                const command_start = nextNonWhitespace(self.source, opening + 1) orelse return;
+                const command_end = shellWordEnd(self.source, command_start);
+                const command = Token{
+                    .start_byte = @intCast(command_start),
+                    .end_byte = @intCast(command_end),
+                };
+                if (isLiteralWord(command.text(self.source))) {
+                    if (self.state.commandKind(command.text(self.source)) != .unknown) {
+                        try self.add(command, .recovered_command);
+                    }
+                }
+
+                const argument_start = nextNonWhitespace(self.source, command_end) orelse return;
+                const argument_end = shellWordEnd(self.source, argument_start);
+                const argument = Token{
+                    .start_byte = @intCast(argument_start),
+                    .end_byte = @intCast(argument_end),
+                };
+                switch (self.state.pathKind(argument.text(self.source), true, false)) {
+                    .path, .prefix => try self.add(argument, .recovered_path),
+                    .none, .invalid => {},
+                }
+                return;
+            }
+        }
+
+        fn scanAnonymousFunctionBodies(self: *Self) !void {
+            var search_start: usize = 0;
+            while (std.mem.indexOfPos(u8, self.source, search_start, "()")) |marker| {
+                search_start = marker + 2;
+                var command_start = nextNonWhitespace(self.source, search_start) orelse continue;
+                if (self.source[command_start] == '{') {
+                    command_start = nextNonWhitespace(self.source, command_start + 1) orelse continue;
+                }
+                const command_end = shellWordEnd(self.source, command_start);
+                if (command_start == command_end) continue;
+                const command = Token{
+                    .start_byte = @intCast(command_start),
+                    .end_byte = @intCast(command_end),
+                };
+                if (isLiteralWord(command.text(self.source)) and
+                    self.state.commandKind(command.text(self.source)) != .unknown)
+                {
+                    try self.add(command, .recovered_command);
+                }
+            }
+        }
+
+        fn scanAssignmentBeforeReservedWord(self: *Self) !void {
+            const assignment_end = shellWordEnd(self.source, 0);
+            if (!isAssignment(self.source[0..assignment_end])) return;
+
+            const opening = nextNonWhitespace(self.source, assignment_end) orelse return;
+            switch (self.source[opening]) {
+                '{' => {
+                    try self.addRecoveredUnknown(opening, opening + 1);
+                    const closing = std.mem.lastIndexOfScalar(u8, self.source, '}') orelse return;
+                    try self.addRecoveredKeyword(closing, closing + 1);
+                },
+                '(' => {
+                    const arithmetic = opening + 1 < self.source.len and self.source[opening + 1] == '(';
+                    const closing = if (arithmetic)
+                        std.mem.lastIndexOf(u8, self.source, "))")
+                    else
+                        std.mem.lastIndexOfScalar(u8, self.source, ')');
+                    if (arithmetic) {
+                        const end = closing orelse self.source.len;
+                        try self.addRecoveredUnknown(opening, end + @min(@as(usize, 2), self.source.len - end));
+                    } else {
+                        try self.addRecoveredUnknown(opening, opening + 1);
+                        if (closing) |end| try self.addRecoveredUnknown(end, end + 1);
+                        try self.scanRecoveredCommand(opening + 1);
+                    }
+                },
+                '!' => {
+                    try self.addRecoveredUnknown(opening, opening + 1);
+                    try self.scanRecoveredCommand(opening + 1);
+                },
+                '[' => {
+                    if (opening + 1 >= self.source.len or self.source[opening + 1] != '[') return;
+                    const closing = std.mem.lastIndexOf(u8, self.source, "]]") orelse return;
+                    try self.addRecoveredUnknown(opening, opening + 2);
+                    try self.spans.append(self.allocator, .{
+                        .start_byte = @intCast(opening + 2),
+                        .end_byte = @intCast(closing),
+                        .style = .recovered_plain,
+                    });
+                    const option_start = nextNonWhitespace(self.source, opening + 2) orelse return;
+                    const option_end = shellWordEnd(self.source, option_start);
+                    if (option_start < option_end and self.source[option_start] == '-') {
+                        try self.spans.append(self.allocator, .{
+                            .start_byte = @intCast(option_start),
+                            .end_byte = @intCast(option_end),
+                            .style = .test_option,
+                        });
+                    }
+                    try self.addRecoveredKeyword(closing, closing + 2);
+                },
+                else => {},
+            }
+        }
+
+        fn scanRecoveredCommand(self: *Self, start: usize) !void {
+            const command_start = nextNonWhitespace(self.source, start) orelse return;
+            const command_end = shellWordEnd(self.source, command_start);
+            if (command_start == command_end) return;
+            const command = Token{
+                .start_byte = @intCast(command_start),
+                .end_byte = @intCast(command_end),
+            };
+            if (isLiteralWord(command.text(self.source)) and
+                self.state.commandKind(command.text(self.source)) != .unknown)
+            {
+                try self.add(command, .recovered_command);
+            }
+        }
+
+        fn addRecoveredUnknown(self: *Self, start: usize, end: usize) !void {
+            try self.spans.append(self.allocator, .{
+                .start_byte = @intCast(start),
+                .end_byte = @intCast(end),
+                .style = .recovered_unknown,
+            });
+        }
+
+        fn addRecoveredKeyword(self: *Self, start: usize, end: usize) !void {
+            try self.spans.append(self.allocator, .{
+                .start_byte = @intCast(start),
+                .end_byte = @intCast(end),
+                .style = .recovered_keyword,
+            });
         }
 
         fn precommand(self: *Self, token: Token) ?Precommand {
@@ -361,6 +522,31 @@ fn isEscaped(text: []const u8, index: usize) bool {
     return backslash_count % 2 != 0;
 }
 
+fn closingBackquote(source: []const u8, start: usize) ?usize {
+    var index = start;
+    while (index < source.len) : (index += 1) {
+        if (source[index] == '`' and !isEscaped(source, index)) return index;
+    }
+    return null;
+}
+
+fn nextNonWhitespace(source: []const u8, start: usize) ?usize {
+    var index = start;
+    while (index < source.len) : (index += 1) {
+        if (!std.ascii.isWhitespace(source[index])) return index;
+    }
+    return null;
+}
+
+fn shellWordEnd(source: []const u8, start: usize) usize {
+    var index = start;
+    while (index < source.len and
+        !std.ascii.isWhitespace(source[index]) and
+        std.mem.indexOfScalar(u8, "`;(){}|&", source[index]) == null) : (index += 1)
+    {}
+    return index;
+}
+
 fn historyDisabledAt(node: tree_sitter.Node, source_index: u32) bool {
     if (source_index < node.startByte() or source_index >= node.endByte()) return false;
     const kind = node.kind();
@@ -404,6 +590,17 @@ fn isLiteralWord(word: []const u8) bool {
     return true;
 }
 
+fn literalCommandWord(word: []const u8) ?[]const u8 {
+    if (isLiteralWord(word)) return word;
+    if (word.len >= 2 and word[0] == '\'' and word[word.len - 1] == '\'') return word[1 .. word.len - 1];
+    if (word.len >= 2 and word[0] == '"' and word[word.len - 1] == '"') {
+        const contents = word[1 .. word.len - 1];
+        if (std.mem.indexOfAny(u8, contents, "\\$`") == null) return contents;
+    }
+    if (word.len > 1 and word[0] == '\\' and isLiteralWord(word[1..])) return word[1..];
+    return null;
+}
+
 fn isReservedWord(kind: []const u8) bool {
     inline for (reserved_words) |word| {
         if (std.mem.eql(u8, kind, word)) return true;
@@ -439,6 +636,18 @@ fn isAssignment(word: []const u8) bool {
         if (!(std.ascii.isAlphanumeric(byte) or byte == '_')) return false;
     }
     return true;
+}
+
+fn isSimpleParameterExpression(word: []const u8) bool {
+    if (word.len < 2 or word[0] != '$') return false;
+    var index: usize = 1;
+    const braced = word[index] == '{';
+    if (braced) index += 1;
+    if (index == word.len or !(std.ascii.isAlphabetic(word[index]) or word[index] == '_')) return false;
+    index += 1;
+    while (index < word.len and (std.ascii.isAlphanumeric(word[index]) or word[index] == '_')) : (index += 1) {}
+    if (!braced) return index == word.len;
+    return index + 1 == word.len and word[index] == '}';
 }
 
 fn isDecimal(word: []const u8) bool {

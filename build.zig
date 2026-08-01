@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
     registerCheck(b, zigsh_module, zsh, tree_sitter);
     registerTests(b, &install.step, target, optimize, tree_sitter, highlight_tools);
     registerDifferentialTest(b, &install.step);
+    registerUpstreamCorpusTest(b, &install.step);
     registerRun(b, &install.step);
 }
 
@@ -326,6 +327,18 @@ fn registerDifferentialTest(b: *std.Build, install_step: *std.Build.Step) void {
     const step = b.step(
         "highlight-differential",
         "Compare semantic regions with a zsh-syntax-highlighting checkout",
+    );
+    step.dependOn(&run.step);
+}
+
+fn registerUpstreamCorpusTest(b: *std.Build, install_step: *std.Build.Step) void {
+    const run = b.addSystemCommand(&.{ "zsh", "-f", "test/compare-upstream-main-corpus.zsh" });
+    if (b.args) |args| run.addArgs(args);
+    run.step.dependOn(install_step);
+
+    const step = b.step(
+        "highlight-upstream-corpus",
+        "Classify native highlights against zsh-syntax-highlighting main test-data",
     );
     step.dependOn(&run.step);
 }

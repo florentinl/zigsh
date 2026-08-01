@@ -27,23 +27,24 @@ pub fn setup() error{ UnsupportedZshVersion, InvalidStyle }!void {
 
 fn styleSpec(style: Style) [:0]const u8 {
     return switch (style) {
-        .plain => "none",
-        .path, .path_prefix => "underline",
-        .string => "fg=yellow",
-        .punctuation, .number => "fg=magenta",
+        .plain, .recovered_plain => "none",
+        .path, .path_prefix, .recovered_path => "underline",
+        .string, .recovered_string => "fg=yellow",
+        .punctuation, .number, .recovered_punctuation => "fg=magenta",
         .operator, .globbing, .history_expansion => "fg=blue",
         .redirection => "fg=yellow",
-        .keyword => "fg=yellow",
+        .keyword, .recovered_keyword => "fg=yellow",
         .function,
         .alias,
         .shell_function,
         .builtin,
         .hashed_command,
         .external_command,
+        .recovered_command,
         => "fg=green",
-        .suffix_alias, .precommand, .auto_directory => "fg=green,underline",
-        .global_alias, .variable => "fg=cyan",
-        .unknown_token, .unknown_command, .parse_error => "fg=red,bold",
+        .suffix_alias, .precommand, .auto_directory, .test_option => "fg=green,underline",
+        .global_alias, .variable, .recovered_variable => "fg=cyan",
+        .unknown_token, .unknown_command, .parse_error, .recovered_unknown => "fg=red,bold",
         .comment => "fg=black,bold",
     };
 }

@@ -116,7 +116,7 @@ fn linePreRedraw() c_int {
     };
     defer std.heap.c_allocator.free(semantic_spans);
 
-    const expanded_spans = if (semantic.containsAlias(semantic_spans)) expanded: {
+    const expanded_spans = if (semantic.requiresVirtualExpansion(semantic_spans)) expanded: {
         const active_alias_engine = if (alias_engine) |*value| value else {
             clearRegions();
             return 0;

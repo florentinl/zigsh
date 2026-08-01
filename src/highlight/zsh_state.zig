@@ -67,6 +67,7 @@ pub const State = struct {
         defer self.allocator.free(path);
         if (command_position) {
             if (isEqualsExpression(word) and isExecutableFile(self.allocator, path)) return .path;
+            if (allow_prefix and isSearchableDirectory(self.allocator, path)) return .prefix;
             return if (allow_prefix and pathPrefixExists(self.allocator, path)) .prefix else .none;
         }
         if (pathExists(self.allocator, path)) return .path;
@@ -81,6 +82,15 @@ pub const State = struct {
 
     pub fn historyCharacter(_: *const State) u8 {
         return zsh.bangchar;
+    }
+
+    pub fn commandParameterExpansion(self: *const State, _: std.mem.Allocator, word: []const u8) !?[]u8 {
+        if (!isSimpleParameterExpression(word)) return null;
+        return self.expandParameters(word);
+    }
+
+    pub fn commentsEnabled(_: *const State) bool {
+        return optionEnabled(zsh.INTERACTIVECOMMENTS);
     }
 
     fn commandPathExists(self: *const State, word: []const u8) bool {
@@ -318,6 +328,11 @@ fn parameterAt(word: []const u8, dollar: usize) ?Parameter {
         end += 1;
     }
     return .{ .name = word[start..name_end], .end = end };
+}
+
+fn isSimpleParameterExpression(word: []const u8) bool {
+    const parameter = parameterAt(word, 0) orelse return false;
+    return parameter.end == word.len;
 }
 
 fn isEqualsExpression(word: []const u8) bool {

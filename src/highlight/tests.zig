@@ -10,6 +10,8 @@ const Style = @import("style.zig").Style;
 
 test {
     _ = @import("edit.zig");
+    _ = @import("redirection.zig");
+    _ = @import("recovery.zig");
     _ = @import("snapshot.zig");
     _ = @import("span.zig");
     _ = @import("style.zig");
@@ -106,6 +108,79 @@ test "aliases may contain parameter syntax" {
     try expectSemanticSpan(source, actual, "$foo", .alias);
 }
 
+test "quoted command words retain command semantics" {
+    const source = "\"missing\"";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "\"missing\"", .unknown_command);
+}
+
+test "unclosed backquotes recover their command and path context" {
+    const source = "`external README.md";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "external", .recovered_command);
+    try expectSemanticSpan(source, actual, "README.md", .recovered_path);
+}
+
+test "anonymous function markers recover their immediate command" {
+    const source = "() external";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "external", .recovered_command);
+}
+
+test "assignments before brace groups retain structural error context" {
+    const source = "foo=bar { :; }";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "{", .recovered_unknown);
+    try expectSemanticSpan(source, actual, "}", .recovered_keyword);
+}
+
+test "assignments before escaped negation recover the following command" {
+    const source = "foo=bar ! :";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    const actual = try semantic.highlight(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "!", .recovered_unknown);
+    try expectSemanticSpan(source, actual, ":", .recovered_command);
+}
+
 test "alias expansion projects changed command context onto original tokens" {
     const source = "separator missing; redirect output; print PIPE external; cycle-a";
     var alias_engine = try AliasEngine.init(std.testing.allocator);
@@ -118,6 +193,18 @@ test "alias expansion projects changed command context onto original tokens" {
     try expectSemanticSpan(source, actual, "missing", .unknown_command);
     try expectSemanticSpan(source, actual, "output", .path);
     try expectSemanticSpan(source, actual, "external", .external_command);
+}
+
+test "safe scalar parameters may reveal a following command" {
+    const source = "$context external";
+    var alias_engine = try AliasEngine.init(std.testing.allocator);
+    defer alias_engine.deinit();
+
+    const state = FakeSemanticState{};
+    const actual = try alias_engine.highlight(source, &state);
+    defer std.testing.allocator.free(actual);
+
+    try expectSemanticSpan(source, actual, "external", .recovered_command);
 }
 
 test "baseline corpus parses within structural limits" {
@@ -277,7 +364,8 @@ const FakeSemanticState = struct {
     }
 
     pub fn commandKind(_: *const FakeSemanticState, word: []const u8) semantic.CommandKind {
-        if (std.mem.eql(u8, word, "sudo") or
+        if (std.mem.eql(u8, word, ":") or
+            std.mem.eql(u8, word, "sudo") or
             std.mem.eql(u8, word, "print") or
             std.mem.eql(u8, word, "ll")) return .builtin;
         if (std.mem.eql(u8, word, "helper")) return .shell_function;
@@ -325,6 +413,15 @@ const FakeSemanticState = struct {
 
     pub fn historyCharacter(_: *const FakeSemanticState) u8 {
         return '!';
+    }
+
+    pub fn commandParameterExpansion(_: *const FakeSemanticState, allocator: std.mem.Allocator, word: []const u8) !?[]u8 {
+        if (!std.mem.eql(u8, word, "$context")) return null;
+        return try allocator.dupe(u8, "()");
+    }
+
+    pub fn commentsEnabled(_: *const FakeSemanticState) bool {
+        return false;
     }
 };
 

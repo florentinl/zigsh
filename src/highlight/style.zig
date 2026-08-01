@@ -27,6 +27,15 @@ pub const Style = enum {
     unknown_command,
     comment,
     parse_error,
+    recovered_keyword,
+    recovered_plain,
+    recovered_punctuation,
+    recovered_command,
+    recovered_path,
+    recovered_string,
+    recovered_variable,
+    recovered_unknown,
+    test_option,
 
     pub fn priority(self: Style) u8 {
         return switch (self) {
@@ -36,7 +45,7 @@ pub const Style = enum {
             .punctuation => 105,
             .operator => 30,
             .number => 40,
-            .redirection => 45,
+            .redirection => 135,
             .keyword => 50,
             .function => 60,
             .alias,
@@ -51,13 +60,21 @@ pub const Style = enum {
             .auto_directory,
             => 65,
             .globbing => 75,
-            .unknown_command => 85,
+            .unknown_command => 125,
             .string => 100,
             .variable => 110,
             .history_expansion => 115,
             .comment => 120,
-            .unknown_token => 125,
+            .unknown_token => 127,
             .parse_error => 130,
+            .recovered_keyword => 137,
+            .recovered_plain => 135,
+            .recovered_punctuation => 136,
+            .recovered_command, .recovered_path => 137,
+            .recovered_string => 135,
+            .recovered_variable => 137,
+            .recovered_unknown => 137,
+            .test_option => 138,
         };
     }
 

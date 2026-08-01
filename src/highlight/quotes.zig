@@ -19,7 +19,24 @@ pub fn appendUnclosedQuote(
         try appendAnsiCEscapes(spans, allocator, source, start_byte, end_byte);
         return true;
     }
-    if (text.len == 0 or text[0] != '"') return false;
+    if (text.len == 0) return false;
+
+    if (text[0] == '`') {
+        if (hasClosingBackquote(text)) return false;
+        try spans.append(allocator, .{
+            .start_byte = start_byte,
+            .end_byte = end_byte,
+            .style = .recovered_plain,
+        });
+        try spans.append(allocator, .{
+            .start_byte = start_byte,
+            .end_byte = start_byte + 1,
+            .style = .recovered_punctuation,
+        });
+        return true;
+    }
+
+    if (text[0] != '"') return false;
 
     const command_substitution = unescapedCommandSubstitution(text);
     try spans.append(allocator, .{
@@ -37,6 +54,18 @@ pub fn appendUnclosedQuote(
     }
     try appendDoubleQuotedParameters(spans, allocator, text, start_byte);
     return true;
+}
+
+fn hasClosingBackquote(text: []const u8) bool {
+    var index: usize = 1;
+    while (index < text.len) : (index += 1) {
+        if (text[index] == '\\') {
+            index += 1;
+            continue;
+        }
+        if (text[index] == '`') return true;
+    }
+    return false;
 }
 
 pub fn appendAnsiCEscapes(
@@ -143,6 +172,17 @@ test "unclosed quotes preserve command substitution delimiters" {
     try std.testing.expectEqualSlices(Span, &.{
         .{ .start_byte = 0, .end_byte = 4, .style = .string },
         .{ .start_byte = 4, .end_byte = 6, .style = .punctuation },
+    }, spans.items);
+}
+
+test "unclosed backquotes retain only their delimiter" {
+    var spans = std.ArrayList(Span).empty;
+    defer spans.deinit(std.testing.allocator);
+
+    try std.testing.expect(try appendUnclosedQuote(&spans, std.testing.allocator, "`ls foo", 0, 7));
+    try std.testing.expectEqualSlices(Span, &.{
+        .{ .start_byte = 0, .end_byte = 7, .style = .recovered_plain },
+        .{ .start_byte = 0, .end_byte = 1, .style = .recovered_punctuation },
     }, spans.items);
 }
 
