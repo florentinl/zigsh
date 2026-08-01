@@ -32,6 +32,30 @@ test "engine produces structural highlights" {
     try expectStyle(result.spans, .comment);
 }
 
+test "AST-driven recovery keeps valid Zsh extensions highlighted" {
+    const source = "() { external }\n{ ls } always { pwd }\n: \"$$\"";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    var result = try engine.highlight(source);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.has_parse_error);
+    try expectStyle(result.spans, .recovered_keyword);
+    try expectStyle(result.spans, .recovered_variable);
+}
+
+test "AST-driven recovery ignores extension-shaped text in literals" {
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    var result = try engine.highlight("print '() { external }'");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.has_parse_error);
+    try expectNoStyle(result.spans, .recovered_keyword);
+}
+
 test "semantic scanner classifies commands, precommands, aliases, and paths" {
     const source = "ll README.md; sudo -u root print G !42; helper; reserved; hashed; external; auto-dir; snapshot.txt; missing";
     var engine = try Engine.init(std.testing.allocator);
@@ -106,6 +130,26 @@ test "aliases may contain parameter syntax" {
     defer std.testing.allocator.free(actual);
 
     try expectSemanticSpan(source, actual, "$foo", .alias);
+}
+
+test "semantic analysis exposes expansion intent independently from styles" {
+    const source = "ll; $context";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    var analysis = try semantic.analyze(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer analysis.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), analysis.expansion_candidates.len);
+    try std.testing.expectEqual(@as(u32, 0), analysis.expansion_candidates[0].start_byte);
+    try std.testing.expectEqual(@as(u32, 2), analysis.expansion_candidates[0].end_byte);
+    try std.testing.expectEqual(semantic.AliasKind.regular, analysis.expansion_candidates[0].kind.alias);
+    try std.testing.expectEqual(@as(u32, 4), analysis.expansion_candidates[1].start_byte);
+    try std.testing.expectEqual(@as(u32, 12), analysis.expansion_candidates[1].end_byte);
+    try std.testing.expect(analysis.expansion_candidates[1].kind == .safe_scalar_parameter);
 }
 
 test "quoted command words retain command semantics" {
@@ -330,6 +374,12 @@ fn expectStyle(spans: []const Span, expected: Style) !void {
     return error.StyleNotFound;
 }
 
+fn expectNoStyle(spans: []const Span, unexpected: Style) !void {
+    for (spans) |span| {
+        if (span.style == unexpected) return error.UnexpectedStyle;
+    }
+}
+
 fn expectSemanticSpan(source: []const u8, spans: []const Span, text: []const u8, style: Style) !void {
     const start = std.mem.indexOf(u8, source, text) orelse return error.TextNotFound;
     for (spans) |span| {
@@ -473,8 +523,8 @@ fn runSemanticAllocationSequence(allocator: std.mem.Allocator) !void {
     defer syntax.deinit(allocator);
 
     const state = FakeSemanticState{};
-    const semantic_spans = try semantic.highlight(allocator, source, try engine.rootNode(), &state);
-    defer allocator.free(semantic_spans);
+    var analysis = try semantic.analyze(allocator, source, try engine.rootNode(), &state);
+    defer analysis.deinit(allocator);
 }
 
 fn runAliasExpansionAllocationSequence(allocator: std.mem.Allocator) !void {

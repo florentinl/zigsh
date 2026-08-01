@@ -49,18 +49,18 @@ pub const Engine = struct {
             const tree = self.parser.parseString(virtual.bytes, null) orelse return error.ParseFailed;
             defer tree.destroy();
 
-            const semantic_spans = try semantic.highlight(
+            var analysis = try semantic.analyze(
                 self.allocator,
                 virtual.bytes,
                 tree.rootNode(),
                 state,
             );
-            defer self.allocator.free(semantic_spans);
+            defer analysis.deinit(self.allocator);
 
             if (expansion_count == max_expansion_count) {
                 return project(
                     self.allocator,
-                    semantic_spans,
+                    analysis.spans,
                     virtual.origins,
                     virtual.lineages,
                     lineages.items,
@@ -70,7 +70,7 @@ pub const Engine = struct {
 
             var replacements = try self.collectReplacements(
                 virtual,
-                semantic_spans,
+                analysis.expansion_candidates,
                 state,
                 &lineages,
                 &unsafe_aliases,
@@ -82,7 +82,7 @@ pub const Engine = struct {
             if (replacements.len() == 0) {
                 return project(
                     self.allocator,
-                    semantic_spans,
+                    analysis.spans,
                     virtual.origins,
                     virtual.lineages,
                     lineages.items,
@@ -100,43 +100,43 @@ pub const Engine = struct {
     fn collectReplacements(
         self: *Engine,
         virtual: VirtualSource,
-        semantic_spans: []const Span,
+        expansion_candidates: []const semantic.ExpansionCandidate,
         state: anytype,
         lineages: *std.ArrayList(Lineage),
         unsafe_aliases: *std.ArrayList(Span),
         remaining_expansions: usize,
         source_limit: usize,
     ) !ReplacementList {
-        var aliases = std.ArrayList(Span).empty;
+        var aliases = std.ArrayList(semantic.ExpansionCandidate).empty;
         defer aliases.deinit(self.allocator);
-        for (semantic_spans) |span| {
-            if (aliasKind(span.style) != null) try aliases.append(self.allocator, span);
+        for (expansion_candidates) |candidate| {
+            if (candidateAliasKind(candidate.kind) != null) try aliases.append(self.allocator, candidate);
         }
-        std.mem.sort(Span, aliases.items, {}, spanLessThan);
+        std.mem.sort(semantic.ExpansionCandidate, aliases.items, {}, candidateLessThan);
 
         var replacements = ReplacementList{};
         errdefer replacements.deinit(self.allocator);
         var previous_end: u32 = 0;
         var projected_length = virtual.bytes.len;
 
-        for (aliases.items) |span| {
+        for (aliases.items) |candidate| {
             if (replacements.len() == remaining_expansions) break;
-            if (span.start_byte < previous_end or span.start_byte >= span.end_byte) continue;
-            if (span.end_byte > virtual.bytes.len) continue;
+            if (candidate.start_byte < previous_end or candidate.start_byte >= candidate.end_byte) continue;
+            if (candidate.end_byte > virtual.bytes.len) continue;
             if (replacements.last()) |previous| {
-                if (previous.start_byte == span.start_byte and previous.end_byte == span.end_byte) continue;
+                if (previous.start_byte == candidate.start_byte and previous.end_byte == candidate.end_byte) continue;
             }
 
-            const lineage_id = uniformLineage(virtual.lineages, span) orelse continue;
-            const word = virtual.bytes[span.start_byte..span.end_byte];
-            const kind = aliasKind(span.style).?;
+            const lineage_id = uniformLineage(virtual.lineages, candidate) orelse continue;
+            const word = virtual.bytes[candidate.start_byte..candidate.end_byte];
+            const kind = candidateAliasKind(candidate.kind).?;
             const alias_hash = aliasHash(kind, word);
             if (lineages.items[lineage_id].depth == max_expansion_depth or
                 containsAlias(lineages.items, lineage_id, alias_hash)) continue;
 
             const expansion = try state.aliasExpansion(self.allocator, word, kind) orelse continue;
             errdefer self.allocator.free(expansion);
-            const origin = sourceOrigin(virtual.origins, span) orelse lineages.items[lineage_id].origin;
+            const origin = sourceOrigin(virtual.origins, candidate) orelse lineages.items[lineage_id].origin;
             if (immediatelyUnsafe(state, expansion)) {
                 if (origin) |unsafe_alias| try unsafe_aliases.append(self.allocator, .{
                     .start_byte = unsafe_alias.start_byte,
@@ -146,7 +146,7 @@ pub const Engine = struct {
                 self.allocator.free(expansion);
                 continue;
             }
-            const removed_length = span.end_byte - span.start_byte;
+            const removed_length = candidate.end_byte - candidate.start_byte;
             projected_length = projected_length - removed_length + expansion.len;
             if (projected_length > source_limit) {
                 self.allocator.free(expansion);
@@ -165,16 +165,16 @@ pub const Engine = struct {
                 .origin = origin,
             });
             try replacements.append(self.allocator, .{
-                .start_byte = span.start_byte,
-                .end_byte = span.end_byte,
+                .start_byte = candidate.start_byte,
+                .end_byte = candidate.end_byte,
                 .bytes = expansion,
                 .lineage = replacement_lineage,
             });
-            previous_end = span.end_byte;
+            previous_end = candidate.end_byte;
         }
         try self.collectParameterReplacements(
             virtual,
-            semantic_spans,
+            expansion_candidates,
             state,
             lineages,
             &replacements,
@@ -189,7 +189,7 @@ pub const Engine = struct {
     fn collectParameterReplacements(
         self: *Engine,
         virtual: VirtualSource,
-        semantic_spans: []const Span,
+        expansion_candidates: []const semantic.ExpansionCandidate,
         state: anytype,
         lineages: *std.ArrayList(Lineage),
         replacements: *ReplacementList,
@@ -197,21 +197,21 @@ pub const Engine = struct {
         source_limit: usize,
         projected_length: *usize,
     ) !void {
-        for (semantic_spans) |span| {
+        for (expansion_candidates) |candidate| {
             if (replacements.len() == remaining_expansions) return;
-            if (span.style != .variable) continue;
-            if (span.start_byte >= span.end_byte or span.end_byte > virtual.bytes.len) continue;
-            if (overlapsReplacement(replacements.slice(), span)) continue;
+            if (!isParameterCandidate(candidate.kind)) continue;
+            if (candidate.start_byte >= candidate.end_byte or candidate.end_byte > virtual.bytes.len) continue;
+            if (overlapsReplacement(replacements.slice(), candidate)) continue;
 
-            const lineage_id = uniformLineage(virtual.lineages, span) orelse continue;
-            const word = virtual.bytes[span.start_byte..span.end_byte];
+            const lineage_id = uniformLineage(virtual.lineages, candidate) orelse continue;
+            const word = virtual.bytes[candidate.start_byte..candidate.end_byte];
             const expansion_hash = parameterHash(word);
             if (lineages.items[lineage_id].depth == max_expansion_depth or
                 containsAlias(lineages.items, lineage_id, expansion_hash)) continue;
 
             const expansion = try state.commandParameterExpansion(self.allocator, word) orelse continue;
             errdefer self.allocator.free(expansion);
-            const removed_length = span.end_byte - span.start_byte;
+            const removed_length = candidate.end_byte - candidate.start_byte;
             const next_length = projected_length.* - removed_length + expansion.len;
             if (next_length > source_limit or lineages.items.len == std.math.maxInt(u16)) {
                 self.allocator.free(expansion);
@@ -223,11 +223,11 @@ pub const Engine = struct {
                 .parent = lineage_id,
                 .alias_hash = expansion_hash,
                 .depth = lineages.items[lineage_id].depth + 1,
-                .origin = sourceOrigin(virtual.origins, span) orelse lineages.items[lineage_id].origin,
+                .origin = sourceOrigin(virtual.origins, candidate) orelse lineages.items[lineage_id].origin,
             });
             try replacements.append(self.allocator, .{
-                .start_byte = span.start_byte,
-                .end_byte = span.end_byte,
+                .start_byte = candidate.start_byte,
+                .end_byte = candidate.end_byte,
                 .bytes = expansion,
                 .lineage = replacement_lineage,
             });
@@ -351,24 +351,33 @@ fn virtualSourceLimit(source_length: usize) usize {
     return @min(max_virtual_source_bytes, with_slack);
 }
 
-fn aliasKind(style: Style) ?semantic.AliasKind {
-    return switch (style) {
-        .alias => .regular,
-        .global_alias => .global,
-        .suffix_alias => .suffix,
-        else => null,
+fn candidateAliasKind(kind: semantic.ExpansionKind) ?semantic.AliasKind {
+    return switch (kind) {
+        .alias => |alias| alias,
+        .safe_scalar_parameter => null,
     };
 }
 
-fn spanLessThan(_: void, left: Span, right: Span) bool {
+fn isParameterCandidate(kind: semantic.ExpansionKind) bool {
+    return switch (kind) {
+        .alias => false,
+        .safe_scalar_parameter => true,
+    };
+}
+
+fn candidateLessThan(
+    _: void,
+    left: semantic.ExpansionCandidate,
+    right: semantic.ExpansionCandidate,
+) bool {
     if (left.start_byte != right.start_byte) return left.start_byte < right.start_byte;
     return left.end_byte < right.end_byte;
 }
 
-fn uniformLineage(lineages: []const u16, span: Span) ?u16 {
-    const lineage = lineages[span.start_byte];
-    for (lineages[span.start_byte..span.end_byte]) |candidate| {
-        if (candidate != lineage) return null;
+fn uniformLineage(lineages: []const u16, candidate: anytype) ?u16 {
+    const lineage = lineages[candidate.start_byte];
+    for (lineages[candidate.start_byte..candidate.end_byte]) |candidate_lineage| {
+        if (candidate_lineage != lineage) return null;
     }
     return lineage;
 }
@@ -385,9 +394,9 @@ fn replacementLessThan(_: void, left: Replacement, right: Replacement) bool {
     return left.start_byte < right.start_byte;
 }
 
-fn overlapsReplacement(replacements: []const Replacement, span: Span) bool {
+fn overlapsReplacement(replacements: []const Replacement, candidate: anytype) bool {
     for (replacements) |replacement| {
-        if (span.start_byte < replacement.end_byte and replacement.start_byte < span.end_byte) return true;
+        if (candidate.start_byte < replacement.end_byte and replacement.start_byte < candidate.end_byte) return true;
     }
     return false;
 }
@@ -466,11 +475,11 @@ fn isBareWord(word: []const u8) bool {
     return std.mem.indexOfAny(u8, word, " \t\r\n'\"\\$`*?[]{}()<>|;&!") == null;
 }
 
-fn sourceOrigin(origins: []const u32, span: Span) ?Span {
-    if (span.start_byte >= span.end_byte or origins[span.start_byte] == no_origin) return null;
-    const start = origins[span.start_byte];
+fn sourceOrigin(origins: []const u32, candidate: anytype) ?Span {
+    if (candidate.start_byte >= candidate.end_byte or origins[candidate.start_byte] == no_origin) return null;
+    const start = origins[candidate.start_byte];
     var expected = start;
-    for (origins[span.start_byte..span.end_byte]) |origin| {
+    for (origins[candidate.start_byte..candidate.end_byte]) |origin| {
         if (origin != expected) return null;
         expected += 1;
     }

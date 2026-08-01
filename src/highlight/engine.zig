@@ -202,7 +202,7 @@ pub const Engine = struct {
             );
         }
 
-        try recovery.append(&captures, self.allocator, source);
+        try recovery.appendFromTree(&captures, self.allocator, source, root);
 
         if (self.query_cursor.didExceedMatchLimit()) return error.QueryMatchLimitExceeded;
         return captures;

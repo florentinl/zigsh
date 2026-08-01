@@ -18,25 +18,27 @@ pub const CommandKind = enum {
 
 pub const PathKind = enum { none, path, prefix, invalid };
 
-pub fn containsAlias(spans: []const Span) bool {
-    for (spans) |span| {
-        switch (span.style) {
-            .alias, .global_alias, .suffix_alias => return true,
-            else => {},
-        }
-    }
-    return false;
-}
+pub const ExpansionKind = union(enum) {
+    alias: AliasKind,
+    safe_scalar_parameter,
+};
 
-pub fn requiresVirtualExpansion(spans: []const Span) bool {
-    for (spans) |span| {
-        switch (span.style) {
-            .alias, .global_alias, .suffix_alias, .variable => return true,
-            else => {},
-        }
+pub const ExpansionCandidate = struct {
+    start_byte: u32,
+    end_byte: u32,
+    kind: ExpansionKind,
+};
+
+pub const Analysis = struct {
+    spans: []Span,
+    expansion_candidates: []ExpansionCandidate,
+
+    pub fn deinit(self: *Analysis, allocator: std.mem.Allocator) void {
+        allocator.free(self.spans);
+        allocator.free(self.expansion_candidates);
+        self.* = undefined;
     }
-    return false;
-}
+};
 
 const Token = struct {
     node: ?tree_sitter.Node = null,
@@ -54,17 +56,29 @@ pub fn highlight(
     root: tree_sitter.Node,
     state: anytype,
 ) ![]Span {
+    const analysis = try analyze(allocator, source, root, state);
+    defer allocator.free(analysis.expansion_candidates);
+    return analysis.spans;
+}
+
+pub fn analyze(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    root: tree_sitter.Node,
+    state: anytype,
+) !Analysis {
     var scanner = Scanner(@TypeOf(state)){
         .allocator = allocator,
         .source = source,
         .state = state,
     };
     errdefer scanner.spans.deinit(allocator);
+    errdefer scanner.expansion_candidates.deinit(allocator);
     try scanner.visit(root);
-    try scanner.scanUnclosedBackquotes();
-    try scanner.scanAnonymousFunctionBodies();
-    try scanner.scanAssignmentBeforeReservedWord();
-    return scanner.spans.toOwnedSlice(allocator);
+    const spans = try scanner.spans.toOwnedSlice(allocator);
+    errdefer allocator.free(spans);
+    const expansion_candidates = try scanner.expansion_candidates.toOwnedSlice(allocator);
+    return .{ .spans = spans, .expansion_candidates = expansion_candidates };
 }
 
 fn Scanner(comptime State: type) type {
@@ -73,11 +87,24 @@ fn Scanner(comptime State: type) type {
         source: []const u8,
         state: State,
         spans: std.ArrayList(Span) = .empty,
+        expansion_candidates: std.ArrayList(ExpansionCandidate) = .empty,
 
         const Self = @This();
 
         fn visit(self: *Self, node: tree_sitter.Node) !void {
-            if (std.mem.eql(u8, node.kind(), "command")) try self.scanCommand(node);
+            if (std.mem.eql(u8, node.kind(), "ERROR")) {
+                try self.scanError(node);
+                return;
+            }
+            if (std.mem.eql(u8, node.kind(), "command")) {
+                try self.scanCommand(node);
+                if (hasLeadingVariableAssignment(node)) {
+                    try self.scanAssignmentBeforeReservedWord(
+                        node.startByte(),
+                        self.commandLineEnd(node.startByte()),
+                    );
+                }
+            }
             if (std.mem.eql(u8, node.kind(), "file_redirect")) try self.scanRedirect(node);
             if (isReservedWord(node.kind())) try self.scanReservedWord(node);
 
@@ -90,11 +117,7 @@ fn Scanner(comptime State: type) type {
         fn scanReservedWord(self: *Self, node: tree_sitter.Node) !void {
             const token = tokenFor(node);
             if (self.state.aliasKind(token.text(self.source), true)) |kind| {
-                try self.add(token, switch (kind) {
-                    .regular => .alias,
-                    .global => .global_alias,
-                    .suffix => .suffix_alias,
-                });
+                try self.addAlias(token, kind);
                 return;
             }
             try self.add(token, styleForCommandKind(self.state.commandKind(token.text(self.source))));
@@ -161,7 +184,7 @@ fn Scanner(comptime State: type) type {
                 const text = argument.text(self.source);
                 const kind = self.state.aliasKind(text, true) orelse break;
                 if (kind == .suffix) break;
-                try self.add(argument, if (kind == .global) .global_alias else .alias);
+                try self.addAlias(argument, kind);
                 count += 1;
                 if (kind != .regular or !self.state.regularAliasExpandsNext(text)) break;
             }
@@ -171,16 +194,13 @@ fn Scanner(comptime State: type) type {
         fn scanCommandToken(self: *Self, token: Token, allow_regular_alias: bool) !void {
             const text = token.text(self.source);
             if (self.state.aliasKind(text, allow_regular_alias)) |kind| {
-                try self.add(token, switch (kind) {
-                    .regular => .alias,
-                    .global => .global_alias,
-                    .suffix => .suffix_alias,
-                });
+                try self.addAlias(token, kind);
                 return;
             }
 
             if (isSimpleParameterExpression(text)) {
                 try self.add(token, .variable);
+                try self.addParameterExpansion(token);
                 return;
             }
 
@@ -208,7 +228,7 @@ fn Scanner(comptime State: type) type {
             const text = token.text(self.source);
             if (isLiteralWord(text)) {
                 if (self.state.aliasKind(text, false)) |kind| {
-                    if (kind == .global) try self.add(token, .global_alias);
+                    if (kind == .global) try self.addAlias(token, kind);
                 }
             }
 
@@ -280,14 +300,25 @@ fn Scanner(comptime State: type) type {
             }
         }
 
-        fn scanUnclosedBackquotes(self: *Self) !void {
-            var opening: usize = 0;
-            while (opening < self.source.len) : (opening += 1) {
-                if (self.source[opening] != '`' or isEscaped(self.source, opening)) continue;
-                if (closingBackquote(self.source, opening + 1) != null) continue;
+        fn scanError(self: *Self, node: tree_sitter.Node) !void {
+            const start = node.startByte();
+            const end = node.endByte();
+            try self.scanUnclosedBackquotes(start, end);
+            try self.scanAnonymousFunctionBodies(start, end);
+        }
 
-                const command_start = nextNonWhitespace(self.source, opening + 1) orelse return;
-                const command_end = shellWordEnd(self.source, command_start);
+        fn commandLineEnd(self: *Self, start: usize) usize {
+            return std.mem.indexOfScalarPos(u8, self.source, start, '\n') orelse self.source.len;
+        }
+
+        fn scanUnclosedBackquotes(self: *Self, start: usize, end: usize) !void {
+            var opening = start;
+            while (opening < end) : (opening += 1) {
+                if (self.source[opening] != '`' or isEscaped(self.source, opening)) continue;
+                if (closingBackquoteBefore(self.source, opening + 1, end) != null) continue;
+
+                const command_start = nextNonWhitespaceBefore(self.source, opening + 1, end) orelse return;
+                const command_end = shellWordEndBefore(self.source, command_start, end);
                 const command = Token{
                     .start_byte = @intCast(command_start),
                     .end_byte = @intCast(command_end),
@@ -298,8 +329,8 @@ fn Scanner(comptime State: type) type {
                     }
                 }
 
-                const argument_start = nextNonWhitespace(self.source, command_end) orelse return;
-                const argument_end = shellWordEnd(self.source, argument_start);
+                const argument_start = nextNonWhitespaceBefore(self.source, command_end, end) orelse return;
+                const argument_end = shellWordEndBefore(self.source, argument_start, end);
                 const argument = Token{
                     .start_byte = @intCast(argument_start),
                     .end_byte = @intCast(argument_end),
@@ -312,15 +343,15 @@ fn Scanner(comptime State: type) type {
             }
         }
 
-        fn scanAnonymousFunctionBodies(self: *Self) !void {
-            var search_start: usize = 0;
-            while (std.mem.indexOfPos(u8, self.source, search_start, "()")) |marker| {
+        fn scanAnonymousFunctionBodies(self: *Self, start: usize, end: usize) !void {
+            var search_start = start;
+            while (std.mem.indexOfPos(u8, self.source[0..end], search_start, "()")) |marker| {
                 search_start = marker + 2;
-                var command_start = nextNonWhitespace(self.source, search_start) orelse continue;
+                var command_start = nextNonWhitespaceBefore(self.source, search_start, end) orelse continue;
                 if (self.source[command_start] == '{') {
-                    command_start = nextNonWhitespace(self.source, command_start + 1) orelse continue;
+                    command_start = nextNonWhitespaceBefore(self.source, command_start + 1, end) orelse continue;
                 }
-                const command_end = shellWordEnd(self.source, command_start);
+                const command_end = shellWordEndBefore(self.source, command_start, end);
                 if (command_start == command_end) continue;
                 const command = Token{
                     .start_byte = @intCast(command_start),
@@ -334,47 +365,50 @@ fn Scanner(comptime State: type) type {
             }
         }
 
-        fn scanAssignmentBeforeReservedWord(self: *Self) !void {
-            const assignment_end = shellWordEnd(self.source, 0);
-            if (!isAssignment(self.source[0..assignment_end])) return;
+        fn scanAssignmentBeforeReservedWord(self: *Self, start: usize, end: usize) !void {
+            const assignment_end = shellWordEndBefore(self.source, start, end);
+            if (!isAssignment(self.source[start..assignment_end])) return;
 
-            const opening = nextNonWhitespace(self.source, assignment_end) orelse return;
+            const opening = nextNonWhitespaceBefore(self.source, assignment_end, end) orelse return;
             switch (self.source[opening]) {
                 '{' => {
                     try self.addRecoveredUnknown(opening, opening + 1);
-                    const closing = std.mem.lastIndexOfScalar(u8, self.source, '}') orelse return;
+                    const closing = start + (std.mem.lastIndexOfScalar(u8, self.source[start..end], '}') orelse return);
                     try self.addRecoveredKeyword(closing, closing + 1);
                 },
                 '(' => {
-                    const arithmetic = opening + 1 < self.source.len and self.source[opening + 1] == '(';
+                    const arithmetic = opening + 1 < end and self.source[opening + 1] == '(';
                     const closing = if (arithmetic)
-                        std.mem.lastIndexOf(u8, self.source, "))")
+                        std.mem.lastIndexOf(u8, self.source[start..end], "))")
                     else
-                        std.mem.lastIndexOfScalar(u8, self.source, ')');
+                        std.mem.lastIndexOfScalar(u8, self.source[start..end], ')');
                     if (arithmetic) {
-                        const end = closing orelse self.source.len;
-                        try self.addRecoveredUnknown(opening, end + @min(@as(usize, 2), self.source.len - end));
+                        const arithmetic_end = start + (closing orelse end - start);
+                        try self.addRecoveredUnknown(opening, arithmetic_end + @min(@as(usize, 2), end - arithmetic_end));
                     } else {
                         try self.addRecoveredUnknown(opening, opening + 1);
-                        if (closing) |end| try self.addRecoveredUnknown(end, end + 1);
-                        try self.scanRecoveredCommand(opening + 1);
+                        if (closing) |offset| {
+                            const closing_byte = start + offset;
+                            try self.addRecoveredUnknown(closing_byte, closing_byte + 1);
+                        }
+                        try self.scanRecoveredCommand(opening + 1, end);
                     }
                 },
                 '!' => {
                     try self.addRecoveredUnknown(opening, opening + 1);
-                    try self.scanRecoveredCommand(opening + 1);
+                    try self.scanRecoveredCommand(opening + 1, end);
                 },
                 '[' => {
-                    if (opening + 1 >= self.source.len or self.source[opening + 1] != '[') return;
-                    const closing = std.mem.lastIndexOf(u8, self.source, "]]") orelse return;
+                    if (opening + 1 >= end or self.source[opening + 1] != '[') return;
+                    const closing = start + (std.mem.lastIndexOf(u8, self.source[start..end], "]]") orelse return);
                     try self.addRecoveredUnknown(opening, opening + 2);
                     try self.spans.append(self.allocator, .{
                         .start_byte = @intCast(opening + 2),
                         .end_byte = @intCast(closing),
                         .style = .recovered_plain,
                     });
-                    const option_start = nextNonWhitespace(self.source, opening + 2) orelse return;
-                    const option_end = shellWordEnd(self.source, option_start);
+                    const option_start = nextNonWhitespaceBefore(self.source, opening + 2, end) orelse return;
+                    const option_end = shellWordEndBefore(self.source, option_start, end);
                     if (option_start < option_end and self.source[option_start] == '-') {
                         try self.spans.append(self.allocator, .{
                             .start_byte = @intCast(option_start),
@@ -388,9 +422,9 @@ fn Scanner(comptime State: type) type {
             }
         }
 
-        fn scanRecoveredCommand(self: *Self, start: usize) !void {
-            const command_start = nextNonWhitespace(self.source, start) orelse return;
-            const command_end = shellWordEnd(self.source, command_start);
+        fn scanRecoveredCommand(self: *Self, start: usize, end: usize) !void {
+            const command_start = nextNonWhitespaceBefore(self.source, start, end) orelse return;
+            const command_end = shellWordEndBefore(self.source, command_start, end);
             if (command_start == command_end) return;
             const command = Token{
                 .start_byte = @intCast(command_start),
@@ -432,6 +466,27 @@ fn Scanner(comptime State: type) type {
                 .start_byte = token.start_byte,
                 .end_byte = token.end_byte,
                 .style = style,
+            });
+        }
+
+        fn addAlias(self: *Self, token: Token, kind: AliasKind) !void {
+            try self.add(token, switch (kind) {
+                .regular => .alias,
+                .global => .global_alias,
+                .suffix => .suffix_alias,
+            });
+            try self.expansion_candidates.append(self.allocator, .{
+                .start_byte = token.start_byte,
+                .end_byte = token.end_byte,
+                .kind = .{ .alias = kind },
+            });
+        }
+
+        fn addParameterExpansion(self: *Self, token: Token) !void {
+            try self.expansion_candidates.append(self.allocator, .{
+                .start_byte = token.start_byte,
+                .end_byte = token.end_byte,
+                .kind = .safe_scalar_parameter,
             });
         }
     };
@@ -512,6 +567,11 @@ fn tokenFor(node: tree_sitter.Node) Token {
     return .{ .node = node, .start_byte = node.startByte(), .end_byte = node.endByte() };
 }
 
+fn hasLeadingVariableAssignment(node: tree_sitter.Node) bool {
+    const first = node.child(0) orelse return false;
+    return std.mem.eql(u8, first.kind(), "variable_assignment");
+}
+
 fn isEscaped(text: []const u8, index: usize) bool {
     var backslash_count: usize = 0;
     var cursor = index;
@@ -522,25 +582,25 @@ fn isEscaped(text: []const u8, index: usize) bool {
     return backslash_count % 2 != 0;
 }
 
-fn closingBackquote(source: []const u8, start: usize) ?usize {
+fn closingBackquoteBefore(source: []const u8, start: usize, end: usize) ?usize {
     var index = start;
-    while (index < source.len) : (index += 1) {
+    while (index < end) : (index += 1) {
         if (source[index] == '`' and !isEscaped(source, index)) return index;
     }
     return null;
 }
 
-fn nextNonWhitespace(source: []const u8, start: usize) ?usize {
+fn nextNonWhitespaceBefore(source: []const u8, start: usize, end: usize) ?usize {
     var index = start;
-    while (index < source.len) : (index += 1) {
+    while (index < end) : (index += 1) {
         if (!std.ascii.isWhitespace(source[index])) return index;
     }
     return null;
 }
 
-fn shellWordEnd(source: []const u8, start: usize) usize {
+fn shellWordEndBefore(source: []const u8, start: usize, end: usize) usize {
     var index = start;
-    while (index < source.len and
+    while (index < end and
         !std.ascii.isWhitespace(source[index]) and
         std.mem.indexOfScalar(u8, "`;(){}|&", source[index]) == null) : (index += 1)
     {}

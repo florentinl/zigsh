@@ -102,7 +102,7 @@ fn linePreRedraw() c_int {
     defer result.deinit(std.heap.c_allocator);
 
     const state = zsh_state.State{ .allocator = std.heap.c_allocator };
-    const semantic_spans = semantic.highlight(
+    var semantic_analysis = semantic.analyze(
         std.heap.c_allocator,
         snapshot.bytes,
         active_engine.rootNode() catch {
@@ -114,9 +114,9 @@ fn linePreRedraw() c_int {
         clearRegions();
         return 0;
     };
-    defer std.heap.c_allocator.free(semantic_spans);
+    defer semantic_analysis.deinit(std.heap.c_allocator);
 
-    const expanded_spans = if (semantic.requiresVirtualExpansion(semantic_spans)) expanded: {
+    const expanded_spans = if (semantic_analysis.expansion_candidates.len != 0) expanded: {
         const active_alias_engine = if (alias_engine) |*value| value else {
             clearRegions();
             return 0;
@@ -131,16 +131,16 @@ fn linePreRedraw() c_int {
 
     const candidates = std.heap.c_allocator.alloc(
         Span,
-        result.spans.len + semantic_spans.len + expanded_span_count,
+        result.spans.len + semantic_analysis.spans.len + expanded_span_count,
     ) catch {
         clearRegions();
         return 0;
     };
     defer std.heap.c_allocator.free(candidates);
     const syntax_end = result.spans.len;
-    const semantic_end = syntax_end + semantic_spans.len;
+    const semantic_end = syntax_end + semantic_analysis.spans.len;
     @memcpy(candidates[0..syntax_end], result.spans);
-    @memcpy(candidates[syntax_end..semantic_end], semantic_spans);
+    @memcpy(candidates[syntax_end..semantic_end], semantic_analysis.spans);
     if (expanded_spans) |owned| {
         @memcpy(candidates[semantic_end..], owned);
     }
