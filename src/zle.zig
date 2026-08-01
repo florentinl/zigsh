@@ -40,6 +40,12 @@ pub fn resetPrompt() void {
     zsh.zle_resetprompt();
 }
 
+/// Redisplay the current edit buffer without rebuilding the prompt. External
+/// event callbacks use this when only region highlights changed.
+pub fn refresh() void {
+    zsh.zrefresh();
+}
+
 /// Bind a raw key sequence to an existing widget in ZLE's `main` keymap.
 pub fn bindKey(sequence: []const u8, widget_name: [:0]const u8) BindKeyError!void {
     return bindKeyInMap("main", sequence, widget_name);

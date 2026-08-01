@@ -19,13 +19,14 @@ zpty -w history_shell \
   "module_path=(${0:A:h:h}/zig-out/lib \$module_path); zmodload -d zigsh zsh/zle; zmodload zigsh; print ZIGSH_READY"
 zpty -r -m history_shell output '*ZIGSH_READY*'
 
-zpty -w history_shell 'history_probe=alpha'
-zpty -r -m history_shell output '*welcome to zig*'
-zpty -w history_shell 'history_probe=beta'
-zpty -r -m history_shell output '*welcome to zig*'
+zpty -w history_shell 'history_probe=alpha; print ZIGSH_HISTORY_ALPHA'
+zpty -r -m history_shell output '*ZIGSH_HISTORY_ALPHA*'
+zpty -w history_shell 'history_probe=beta; print ZIGSH_HISTORY_BETA'
+zpty -r -m history_shell output '*ZIGSH_HISTORY_BETA*'
 
 zpty -wn history_shell \
   $'history_probe='"$cursor_up$cursor_up$cursor_down"$'\n'
-zpty -r -m history_shell output '*welcome to zig*'
+zpty -w history_shell 'print ZIGSH_HISTORY_NAVIGATED'
+zpty -r -m history_shell output '*ZIGSH_HISTORY_NAVIGATED*'
 zpty -w history_shell 'print ZIGSH_RESULT:$history_probe'
 zpty -r -m history_shell output '*ZIGSH_RESULT:beta*'

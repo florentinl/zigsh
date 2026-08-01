@@ -269,6 +269,8 @@ fn registerTests(
     registerUnitTest(b, test_step, target, optimize, "src/prompt/template.zig");
     registerZshUnitTest(b, test_step, target, optimize, zsh, "src/prompt/metrics.zig");
     registerZshUnitTest(b, test_step, target, optimize, zsh, "src/zle_hooks.zig");
+    registerZshUnitTest(b, test_step, target, optimize, zsh, "src/zle_events.zig");
+    registerAsyncUnitTests(b, test_step, target, optimize, zsh, tree_sitter);
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");
@@ -292,6 +294,30 @@ fn registerTests(
     unit_tests.step.dependOn(&tree_sitter.prepare.step);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
+}
+
+fn registerAsyncUnitTests(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    zsh: ZshConfiguration,
+    tree_sitter: TreeSitterConfiguration,
+) void {
+    const unit_module = b.createModule(.{
+        .root_source_file = b.path("src/async_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureZshModule(unit_module, zsh.include_path);
+    configureParserModule(unit_module, tree_sitter, tree_sitter.scanner_source);
+    const unit_tests = b.addTest(.{ .root_module = unit_module });
+    dependOnZshPreparation(&unit_tests.step, zsh);
+    unit_tests.step.dependOn(&tree_sitter.prepare.step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
+    b.step("async-test", "Run async worker and protocol unit tests").dependOn(&run_unit_tests.step);
 }
 
 fn registerZshUnitTest(

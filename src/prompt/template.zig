@@ -74,22 +74,25 @@ pub fn render(
                         if (style_depth > 0) if (styles[style_depth - 1]) |name| try appendStyle(output, allocator, name);
                     }
                 } else if (std.mem.startsWith(u8, tag, "style.")) {
-                    if (style_depth + 1 < max_depth) {
+                    if (enabled[depth] and style_depth + 1 < max_depth) {
                         const name = std.meta.stringToEnum(style.Name, tag[6..]) orelse continue;
                         styles[style_depth] = name;
                         style_depth += 1;
-                        if (enabled[depth]) try appendStyle(output, allocator, name);
+                        try appendStyle(output, allocator, name);
                     }
                 } else if (std.mem.eql(u8, tag, "fill")) {
                     if (enabled[depth]) try output.appendNTimes(allocator, ' ', fill_width);
                 } else if (enabled[depth]) {
                     if (std.meta.stringToEnum(segment.Name, tag)) |name| {
                         if (values[@intFromEnum(name)].text) |text| {
-                            if (values[@intFromEnum(name)].style_name) |name_style| try appendStyle(output, allocator, name_style);
-                            try appendLiteral(output, allocator, text);
-                            if (values[@intFromEnum(name)].style_name != null) {
+                            if (values[@intFromEnum(name)].style_name) |name_style| {
+                                try appendReset(output, allocator);
+                                try appendStyle(output, allocator, name_style);
+                                try appendLiteral(output, allocator, text);
                                 try appendReset(output, allocator);
                                 if (style_depth > 0) if (styles[style_depth - 1]) |outer| try appendStyle(output, allocator, outer);
+                            } else {
+                                try appendLiteral(output, allocator, text);
                             }
                         }
                     }
@@ -298,4 +301,22 @@ test "character separator remains outside the error background" {
 
     try std.testing.expect(std.mem.indexOf(u8, output.items, "48;2") == null);
     try std.testing.expect(std.mem.endsWith(u8, output.items, "%{\x1b[0m%} "));
+}
+
+test "disabled conditional styles cannot leak a panel background into fill" {
+    const allocator = std.testing.allocator;
+    const count = @typeInfo(segment.Name).@"enum".fields.len;
+    const values: [count]segment.Output = [_]segment.Output{.{}} ** count;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try render(
+        &output,
+        allocator,
+        "{{style.panel}}x{{if.git}}{{style.separator}}y{{/style}}{{/if}}{{/style}}{{fill}}z",
+        &values,
+        3,
+    );
+
+    try std.testing.expect(std.mem.endsWith(u8, output.items, "%{\x1b[0m%}   z"));
 }

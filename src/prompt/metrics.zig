@@ -5,6 +5,21 @@ const allocator = std.heap.c_allocator;
 const segment_count = @typeInfo(segment.Name).@"enum".fields.len;
 pub const max_lines = segment_count;
 
+pub const Trigger = enum { preprompt, async_completion, resize };
+
+pub const Phases = struct {
+    context_ns: u64 = 0,
+    sync_wait_ns: u64 = 0,
+    cache_ns: u64 = 0,
+    segments_ns: u64 = 0,
+    layout_ns: u64 = 0,
+    assignment_ns: u64 = 0,
+    render_total_ns: u64 = 0,
+    initial_total_ns: u64 = 0,
+    git_worker_ns: u64 = 0,
+    settled_after_ns: u64 = 0,
+};
+
 pub const Entry = struct {
     duration_ns: u64 = 0,
     text: ?[]u8 = null,
@@ -17,6 +32,9 @@ pub const Entry = struct {
 
 pub const Snapshot = struct {
     segments: [segment_count]Entry = [_]Entry{.{}} ** segment_count,
+    phases: Phases = .{},
+    trigger: Trigger = .preprompt,
+    prompt_changed: bool = false,
 
     pub fn deinit(self: *Snapshot) void {
         for (&self.segments) |*entry| entry.deinit();
@@ -135,4 +153,21 @@ test "recordSegment escapes quoted output" {
         "a\\\\b\\n\\\"c\\\"",
         snapshot.segments[@intFromEnum(segment.Name.directory)].text.?,
     );
+}
+
+test "snapshots retain prompt phase diagnostics" {
+    var snapshot: Snapshot = .{
+        .phases = .{
+            .context_ns = 2 * std.time.ns_per_ms,
+            .render_total_ns = 3 * std.time.ns_per_ms,
+            .git_worker_ns = 2 * std.time.ns_per_s,
+        },
+        .trigger = .async_completion,
+        .prompt_changed = true,
+    };
+    defer snapshot.deinit();
+
+    try std.testing.expectEqual(Trigger.async_completion, snapshot.trigger);
+    try std.testing.expect(snapshot.prompt_changed);
+    try std.testing.expectEqual(@as(u64, 2 * std.time.ns_per_s), snapshot.phases.git_worker_ns);
 }

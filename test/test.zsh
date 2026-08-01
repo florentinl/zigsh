@@ -2,13 +2,20 @@
 set -eu
 
 module_path=("${0:A:h:h}/zig-out/lib" $module_path)
+COLUMNS=120
 zmodload -d zigsh zsh/zle
 zmodload zigsh
 
 [[ $PROMPT == *'╭─'* ]]
 [[ $PROMPT == *' '* ]]
-[[ $PROMPT == *$'\n'*'╰─'*'❯ ' ]]
+[[ $PROMPT == *'  zigsh '* ]]
+current_branch=$(git branch --show-current)
+[[ -z $current_branch || $PROMPT == *"$current_branch "* ]]
+[[ $PROMPT == *$'\n'*'╰─'*'❯'* ]]
 [[ $RPROMPT == *'─╯'* ]]
+prompt_fill=${PROMPT#*}
+prompt_fill=${prompt_fill%%*}
+[[ $prompt_fill != *'48;2'* ]]
 [[ ! -o prompt_subst ]]
 [[ $HISTFILE == "$HOME/.zsh_history" ]]
 (( HISTSIZE == 50000 ))
@@ -21,9 +28,14 @@ zmodload zigsh
 [[ -o share_history ]]
 
 timing_output=$(zigsh timings)
-[[ $timing_output == *'Here are the timings of modules in your prompt'* ]]
+[[ $timing_output == *'Prompt pipeline (latest render:'* ]]
+[[ $timing_output == *'render_total'* ]]
+[[ $timing_output == *'initial_total'* ]]
+[[ $timing_output == *'context'* ]]
+[[ $timing_output == *'layout'* ]]
+[[ $timing_output == *'git_worker'* ]]
+[[ $timing_output == *'Segment renderers'* ]]
 [[ $timing_output == *'directory'* ]]
-[[ $timing_output == *'git_status'* ]]
 
 normal_cursor_up=$'\e[A'
 normal_cursor_down=$'\e[B'

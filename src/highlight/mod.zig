@@ -1,10 +1,8 @@
 const std = @import("std");
-const alias_expansion = @import("alias_expansion.zig");
-const semantic = @import("semantic.zig");
-const spans = @import("span.zig");
+const async_manager = @import("../async/manager.zig");
 const zle_hooks = @import("../zle_hooks.zig");
 const regions = @import("zsh59_regions.zig");
-const zsh_state = @import("zsh_state.zig");
+const wire = @import("wire.zig");
 
 const zsh = @cImport({
     @cInclude("Zle/zle.mdh");
@@ -17,34 +15,33 @@ pub const Snapshot = @import("snapshot.zig").Snapshot;
 pub const Span = @import("span.zig").Span;
 pub const Style = @import("style.zig").Style;
 
-var engine: ?Engine = null;
-var alias_engine: ?alias_expansion.Engine = null;
 var active = false;
 var regions_current = false;
+var current_source: ?[]u8 = null;
+var desired_snapshot: ?Snapshot = null;
+var inflight_snapshot: ?Snapshot = null;
+var inflight_generation: ?u64 = null;
+var inflight_worker_epoch: u64 = 0;
+var generation: u64 = 0;
 var redraw_subscription = zle_hooks.Subscription.init(linePreRedraw);
+var completion_subscription = async_manager.CompletionSubscription.init(workerCompleted);
+
+const foreground_budget_ns = 3 * std.time.ns_per_ms;
+const allocator = std.heap.c_allocator;
 
 pub fn setup() c_int {
     if (active or highlightingDisabled()) return 0;
 
-    engine = Engine.init(std.heap.c_allocator) catch return 1;
-    alias_engine = alias_expansion.Engine.init(std.heap.c_allocator) catch {
-        engine.?.deinit();
-        engine = null;
-        return 1;
-    };
     regions.setup() catch {
-        alias_engine.?.deinit();
-        alias_engine = null;
-        engine.?.deinit();
-        engine = null;
         regions.resetTheme();
         return 1;
     };
     redraw_subscription.register() catch {
-        alias_engine.?.deinit();
-        alias_engine = null;
-        engine.?.deinit();
-        engine = null;
+        regions.resetTheme();
+        return 1;
+    };
+    completion_subscription.register() catch {
+        redraw_subscription.unregister();
         regions.resetTheme();
         return 1;
     };
@@ -55,12 +52,12 @@ pub fn setup() c_int {
 
 pub fn cleanup() void {
     if (!active) return;
+    completion_subscription.unregister();
     redraw_subscription.unregister();
     regions.cleanup();
-    if (alias_engine) |*active_alias_engine| active_alias_engine.deinit();
-    alias_engine = null;
-    if (engine) |*active_engine| active_engine.deinit();
-    engine = null;
+    clearDesired();
+    clearInflight();
+    clearCurrentSource();
     active = false;
     regions_current = false;
 }
@@ -75,93 +72,141 @@ fn highlightingDisabled() bool {
 
 fn linePreRedraw() zle_hooks.Effects {
     if (zsh.zlecontext == zsh.ZLCON_SELECT or zsh.zlecontext == zsh.ZLCON_VARED) {
-        clearRegions();
-        return .{};
+        clearDesired();
+        clearInflight();
+        return .{ .regions_changed = clearRegions() };
     }
 
     const line_length = std.math.cast(usize, zsh.zlell) orelse {
-        clearRegions();
-        return .{};
+        clearDesired();
+        clearInflight();
+        return .{ .regions_changed = clearRegions() };
     };
     const line: []const zsh.ZLE_CHAR_T = if (line_length == 0)
         &.{}
     else
         zsh.zleline[0..line_length];
-    var snapshot = Snapshot.fromCodepoints(std.heap.c_allocator, line) catch {
-        clearRegions();
-        return .{};
+    var snapshot = Snapshot.fromCodepoints(allocator, line) catch {
+        clearDesired();
+        clearInflight();
+        return .{ .regions_changed = clearRegions() };
     };
-    defer snapshot.deinit(std.heap.c_allocator);
-
-    const active_engine = if (engine) |*value| value else return .{};
-    if (regions_current and active_engine.isCurrentSource(snapshot.bytes)) return .{};
-
-    var result = active_engine.highlight(snapshot.bytes) catch {
-        clearRegions();
+    if (desired_snapshot != null and std.mem.eql(u8, desired_snapshot.?.bytes, snapshot.bytes)) {
+        snapshot.deinit(allocator);
         return .{};
-    };
-    defer result.deinit(std.heap.c_allocator);
-
-    const state = zsh_state.State{ .allocator = std.heap.c_allocator };
-    var semantic_analysis = semantic.analyze(
-        std.heap.c_allocator,
-        snapshot.bytes,
-        active_engine.rootNode() catch {
-            clearRegions();
-            return .{};
-        },
-        &state,
-    ) catch {
-        clearRegions();
-        return .{};
-    };
-    defer semantic_analysis.deinit(std.heap.c_allocator);
-
-    const expanded_spans = if (semantic_analysis.expansion_candidates.len != 0) expanded: {
-        const active_alias_engine = if (alias_engine) |*value| value else {
-            clearRegions();
-            return .{};
-        };
-        break :expanded active_alias_engine.highlight(snapshot.bytes, &state) catch {
-            clearRegions();
-            return .{};
-        };
-    } else null;
-    defer if (expanded_spans) |owned| std.heap.c_allocator.free(owned);
-    const expanded_span_count = if (expanded_spans) |owned| owned.len else 0;
-
-    const candidates = std.heap.c_allocator.alloc(
-        Span,
-        result.spans.len + semantic_analysis.spans.len + expanded_span_count,
-    ) catch {
-        clearRegions();
-        return .{};
-    };
-    defer std.heap.c_allocator.free(candidates);
-    const syntax_end = result.spans.len;
-    const semantic_end = syntax_end + semantic_analysis.spans.len;
-    @memcpy(candidates[0..syntax_end], result.spans);
-    @memcpy(candidates[syntax_end..semantic_end], semantic_analysis.spans);
-    if (expanded_spans) |owned| {
-        @memcpy(candidates[semantic_end..], owned);
     }
 
-    const composed = spans.compose(std.heap.c_allocator, @intCast(snapshot.bytes.len), candidates) catch {
-        clearRegions();
-        return .{};
-    };
-    std.heap.c_allocator.free(result.spans);
-    result.spans = composed;
+    clearDesired();
+    desired_snapshot = snapshot;
+    const matches_current = regions_current and current_source != null and
+        std.mem.eql(u8, current_source.?, desired_snapshot.?.bytes);
+    const cleared = if (matches_current) false else clearRegions();
 
-    regions.apply(snapshot, result.spans) catch {
-        clearRegions();
-        return .{};
-    };
-    regions_current = true;
-    return .{};
+    if (inflight_generation != null and inflight_worker_epoch != async_manager.epoch()) {
+        clearInflight();
+    }
+    if (inflight_generation != null) return .{ .regions_changed = cleared };
+    if (matches_current) return .{ .regions_changed = cleared };
+
+    if (async_manager.activeJob() != null and async_manager.activeJob().? != .highlight and
+        !async_manager.cancelAndRestart()) return .{ .regions_changed = cleared };
+
+    var frame = (startDesired(true) catch return .{ .regions_changed = cleared }) orelse
+        return .{ .regions_changed = cleared };
+    defer frame.deinit(allocator);
+    const applied = installResult(&frame);
+    return .{ .regions_changed = cleared or applied };
 }
 
-fn clearRegions() void {
+fn workerCompleted(frame: *const async_manager.protocol.Frame) zle_hooks.Effects {
+    if (frame.header.job != .highlight) return .{};
+    return .{ .regions_changed = installResult(frame) };
+}
+
+fn installResult(frame: *const async_manager.protocol.Frame) bool {
+    if (frame.header.message != .response or
+        inflight_generation == null or
+        frame.header.generation != inflight_generation.? or
+        inflight_worker_epoch != async_manager.epoch()) return false;
+    if (frame.header.status != .ok) {
+        std.log.err("highlight worker failed: {s}", .{frame.payload});
+        clearInflight();
+        return false;
+    }
+
+    const snapshot = if (inflight_snapshot) |*value| value else return false;
+    const is_desired = desired_snapshot != null and
+        std.mem.eql(u8, desired_snapshot.?.bytes, snapshot.bytes);
+    if (!is_desired) {
+        clearInflight();
+        _ = startDesired(false) catch null;
+        return false;
+    }
+    const result = wire.decode(allocator, frame.payload) catch {
+        clearInflight();
+        return false;
+    };
+    defer allocator.free(result);
+    for (result) |span| {
+        if (span.end_byte > snapshot.bytes.len) {
+            clearInflight();
+            return false;
+        }
+    }
+    regions.apply(snapshot.*, result) catch {
+        clearInflight();
+        _ = clearRegions();
+        return false;
+    };
+
+    const source = allocator.dupe(u8, snapshot.bytes) catch {
+        clearInflight();
+        _ = clearRegions();
+        return false;
+    };
+    clearCurrentSource();
+    current_source = source;
+    regions_current = true;
+    clearInflight();
+    return true;
+}
+
+fn startDesired(wait: bool) !?async_manager.protocol.Frame {
+    const desired = desired_snapshot orelse return null;
+    if (inflight_generation != null) return null;
+    inflight_snapshot = try Snapshot.fromUtf8(allocator, desired.bytes);
+    errdefer clearInflight();
+    generation +%= 1;
+    if (generation == 0) generation = 1;
+    inflight_generation = generation;
+    inflight_worker_epoch = async_manager.epoch();
+    const deadline = async_manager.deadlineAfter(if (wait) foreground_budget_ns else std.time.ns_per_ms);
+    if (wait) return try async_manager.submitAndWait(.highlight, generation, desired.bytes, deadline);
+    try async_manager.submit(.highlight, generation, desired.bytes, deadline);
+    return null;
+}
+
+fn clearDesired() void {
+    if (desired_snapshot) |*snapshot| snapshot.deinit(allocator);
+    desired_snapshot = null;
+}
+
+fn clearInflight() void {
+    if (inflight_snapshot) |*snapshot| snapshot.deinit(allocator);
+    inflight_snapshot = null;
+    inflight_generation = null;
+    inflight_worker_epoch = 0;
+}
+
+fn clearCurrentSource() void {
+    if (current_source) |source| allocator.free(source);
+    current_source = null;
+}
+
+fn clearRegions() bool {
+    const changed = regions_current;
     regions.clear();
     regions_current = false;
+    clearCurrentSource();
+    return changed;
 }

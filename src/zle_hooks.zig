@@ -3,11 +3,16 @@ const zle = @import("zle.zig");
 
 pub const Effects = struct {
     prompt_changed: bool = false,
+    regions_changed: bool = false,
 
-    fn merge(self: *Effects, next: Effects) void {
+    pub fn merge(self: *Effects, next: Effects) void {
         self.prompt_changed = self.prompt_changed or next.prompt_changed;
+        self.regions_changed = self.regions_changed or next.regions_changed;
     }
 };
+
+pub const DispatchContext = enum { pre_redraw, external };
+pub const Repaint = enum { none, reexpand_prompt, refresh, reset_prompt };
 
 pub const Callback = *const fn () Effects;
 
@@ -85,13 +90,33 @@ fn dispatch(_: [*c][*c]u8) callconv(.c) c_int {
     dispatching = true;
     defer dispatching = false;
 
-    const effects = runCallbacks();
-    if (effects.prompt_changed) {
-        // redrawhook() is always followed by Zsh's normal zrefresh(). Update
-        // its cached prompt buffers here without starting a nested refresh.
-        zle.reexpandPrompt();
-    }
+    apply(runCallbacks(), .pre_redraw);
     return 0;
+}
+
+pub fn applyExternal(effects: Effects) void {
+    apply(effects, .external);
+}
+
+fn apply(effects: Effects, context: DispatchContext) void {
+    switch (repaintFor(effects, context)) {
+        .none => {},
+        .reexpand_prompt => zle.reexpandPrompt(),
+        .refresh => zle.refresh(),
+        .reset_prompt => zle.resetPrompt(),
+    }
+}
+
+pub fn repaintFor(effects: Effects, context: DispatchContext) Repaint {
+    return switch (context) {
+        .pre_redraw => if (effects.prompt_changed) .reexpand_prompt else .none,
+        .external => if (effects.prompt_changed)
+            .reset_prompt
+        else if (effects.regions_changed)
+            .refresh
+        else
+            .none,
+    };
 }
 
 fn runCallbacks() Effects {
@@ -144,4 +169,17 @@ test "subscriptions own idempotent registration and removal" {
     subscription.unregister();
     subscription.unregister();
     try std.testing.expectEqual(@as(usize, 0), callback_count);
+}
+
+test "effect flushing selects one strongest repaint" {
+    try std.testing.expectEqual(Repaint.none, repaintFor(.{}, .external));
+    try std.testing.expectEqual(Repaint.refresh, repaintFor(.{ .regions_changed = true }, .external));
+    try std.testing.expectEqual(
+        Repaint.reset_prompt,
+        repaintFor(.{ .prompt_changed = true, .regions_changed = true }, .external),
+    );
+    try std.testing.expectEqual(
+        Repaint.reexpand_prompt,
+        repaintFor(.{ .prompt_changed = true, .regions_changed = true }, .pre_redraw),
+    );
 }

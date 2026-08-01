@@ -8,6 +8,22 @@ dump_file="$test_home/regions"
 buffer_file="$test_home/buffer"
 trap 'zpty -d highlight_shell 2>/dev/null || true; rm -rf -- "$test_home"' EXIT
 
+wait-for-redraw() {
+  local chunk
+  local -i idle_polls=0
+  local -i received_output=0
+  repeat 200; do
+    if zpty -rt highlight_shell chunk; then
+      idle_polls=0
+      received_output=1
+    elif (( received_output && ++idle_polls == 50 )); then
+      return 0
+    fi
+    sleep 0.01
+  done
+  return 1
+}
+
 zpty -b highlight_shell env \
   HOME="$test_home" \
   ZDOTDIR="$test_home" \
@@ -30,7 +46,9 @@ bindkey '^G' zigsh-dump-highlights
 print ZIGSH_HIGHLIGHT_READY"
 zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHT_READY*'
 
-zpty -wn highlight_shell $'if true; then echo "é🙂 $USER"; fi # note\C-G'
+zpty -wn highlight_shell $'if true; then echo "é🙂 $USER"; fi # note'
+wait-for-redraw
+zpty -wn highlight_shell $'\C-G'
 zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_1*'
 
 regions=("${(@f)$(<"$dump_file")}")
@@ -49,7 +67,9 @@ for iteration in {1..20}; do
   zpty -r -m highlight_shell output "*ZIGSH_RELOADED_$iteration*"
 done
 
-zpty -wn highlight_shell $'for item in one two; do print "$item"; done\C-G'
+zpty -wn highlight_shell $'for item in one two; do print "$item"; done'
+wait-for-redraw
+zpty -wn highlight_shell $'\C-G'
 zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_2*'
 
 regions=("${(@f)$(<"$dump_file")}")
@@ -59,6 +79,8 @@ joined_regions="${(F)regions}"
 [[ "$joined_regions" == *$'39 43 '* ]]
 
 zpty -wn highlight_shell $'\e[200~echo one\necho two\e[201~'
-zpty -wn highlight_shell $'\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\C-G'
+zpty -wn highlight_shell $'\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f'
+wait-for-redraw
+zpty -wn highlight_shell $'\C-G'
 zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_3*'
 [[ "$(<"$buffer_file")" == 'echo one' ]]

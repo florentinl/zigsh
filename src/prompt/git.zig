@@ -3,7 +3,7 @@ const c = @cImport({
     @cInclude("stdio.h");
 });
 
-pub const Provider = enum { github, gitlab, generic };
+pub const Provider = enum { unknown, github, gitlab, generic };
 
 pub const Counts = struct {
     staged: usize = 0,
@@ -23,7 +23,7 @@ pub const Info = struct {
     commit: ?[]u8 = null,
     tag: ?[]u8 = null,
     operation: ?[]u8 = null,
-    provider: Provider = .generic,
+    provider: Provider = .unknown,
     counts: Counts = .{},
 
     pub fn deinit(self: *Info, allocator: std.mem.Allocator) void {
@@ -34,6 +34,22 @@ pub const Info = struct {
         if (self.tag) |value| allocator.free(value);
         if (self.operation) |value| allocator.free(value);
         self.* = undefined;
+    }
+
+    pub fn clone(self: Info, allocator: std.mem.Allocator) !Info {
+        var copy = Info{
+            .root = try allocator.dupe(u8, self.root),
+            .dir = undefined,
+            .provider = self.provider,
+            .counts = self.counts,
+        };
+        errdefer copy.deinit(allocator);
+        copy.dir = try allocator.dupe(u8, self.dir);
+        if (self.branch) |value| copy.branch = try allocator.dupe(u8, value);
+        if (self.commit) |value| copy.commit = try allocator.dupe(u8, value);
+        if (self.tag) |value| copy.tag = try allocator.dupe(u8, value);
+        if (self.operation) |value| copy.operation = try allocator.dupe(u8, value);
+        return copy;
     }
 };
 
@@ -69,10 +85,53 @@ pub fn inspect(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8) !?Info
     }
     if (try runGit(allocator, io, cwd, &.{ "remote", "-v" })) |remotes| {
         defer allocator.free(remotes);
-        if (std.mem.indexOf(u8, remotes, "github") != null) info.provider = .github else if (std.mem.indexOf(u8, remotes, "gitlab") != null) info.provider = .gitlab;
+        info.provider = providerFromRemotes(remotes);
     }
     info.operation = try operation(allocator, info.dir);
     return info;
+}
+
+pub fn inspectFast(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8) !?Info {
+    const metadata = try runGit(
+        allocator,
+        io,
+        cwd,
+        &.{ "rev-parse", "--show-toplevel", "--absolute-git-dir", "--abbrev-ref", "HEAD" },
+    ) orelse return null;
+    defer allocator.free(metadata);
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, metadata, "\r\n"), '\n');
+    const root = lines.next() orelse return null;
+    const dir = lines.next() orelse return null;
+    const branch = lines.next() orelse return null;
+    if (root.len == 0 or dir.len == 0) return null;
+
+    var info = Info{
+        .root = try allocator.dupe(u8, root),
+        .dir = undefined,
+    };
+    errdefer info.deinit(allocator);
+    info.dir = try allocator.dupe(u8, dir);
+    if (branch.len != 0 and !std.mem.eql(u8, branch, "HEAD")) {
+        info.branch = try allocator.dupe(u8, branch);
+    }
+    if (try runGit(allocator, io, cwd, &.{ "remote", "-v" })) |remotes| {
+        defer allocator.free(remotes);
+        info.provider = providerFromRemotes(remotes);
+    }
+    return info;
+}
+
+fn providerFromRemotes(remotes: []const u8) Provider {
+    if (std.mem.indexOf(u8, remotes, "github") != null) return .github;
+    if (std.mem.indexOf(u8, remotes, "gitlab") != null) return .gitlab;
+    return .generic;
+}
+
+test "provider detection is available to the fast metadata path" {
+    try std.testing.expectEqual(Provider.github, providerFromRemotes("origin git@github.com:owner/repo.git"));
+    try std.testing.expectEqual(Provider.gitlab, providerFromRemotes("origin https://gitlab.com/owner/repo.git"));
+    try std.testing.expectEqual(Provider.generic, providerFromRemotes("origin ssh://git.example/repo.git"));
 }
 
 fn runGit(allocator: std.mem.Allocator, _: std.Io, cwd: []const u8, args: []const []const u8) !?[]u8 {
@@ -212,4 +271,22 @@ test "inspects the repository containing the test process" {
     defer info.deinit(allocator);
 
     try std.testing.expect(info.branch != null or info.commit != null);
+}
+
+test "fast inspection finds repository root and branch metadata" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(cwd);
+
+    var info = (try inspectFast(allocator, io, cwd)) orelse return error.TestUnexpectedResult;
+    defer info.deinit(allocator);
+
+    try std.testing.expect(contextPathContains(info.root, cwd));
+    try std.testing.expect(info.provider != .unknown);
+}
+
+fn contextPathContains(root: []const u8, path: []const u8) bool {
+    return std.mem.eql(u8, root, path) or
+        (std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/');
 }
