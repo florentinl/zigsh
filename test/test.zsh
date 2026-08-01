@@ -5,7 +5,10 @@ module_path=("${0:A:h:h}/zig-out/lib" $module_path)
 zmodload -d zigsh zsh/zle
 zmodload zigsh
 
-[[ $PROMPT == "welcome to zig -> " ]]
+[[ $PROMPT == $' '*$'\n--> ' ]]
+[[ $PROMPT == *"ok"$'\n--> ' ]]
+[[ -z $RPROMPT ]]
+[[ ! -o prompt_subst ]]
 [[ $HISTFILE == "$HOME/.zsh_history" ]]
 (( HISTSIZE == 50000 ))
 (( SAVEHIST == 10000 ))

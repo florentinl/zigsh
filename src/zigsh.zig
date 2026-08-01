@@ -61,6 +61,7 @@ pub export fn boot_(_: zsh.Module) callconv(.c) c_int {
 }
 
 pub export fn cleanup_(module: zsh.Module) callconv(.c) c_int {
+    prompt.cleanup();
     history.cleanup();
     return zsh.setfeatureenables(module, &module_features, null);
 }

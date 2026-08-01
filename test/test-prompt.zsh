@@ -36,6 +36,10 @@ zpty -b prompt_shell env \
 wait-for-output
 startup_output=$REPLY
 
+zpty -wn prompt_shell $'\e[200~false\n\e[201~'
+wait-for-output
+failure_output=$REPLY
+
 zpty -wn prompt_shell $'\e[200~echo one\necho two\e[201~'
 wait-for-output
 paste_output=$REPLY
@@ -44,5 +48,8 @@ zpty -wn prompt_shell $'\x7f'
 wait-for-output
 backspace_output=$REPLY
 
-[[ "$startup_output" == *'welcome to zig -> '* ]]
+[[ "$startup_output" == *' '* ]]
+[[ "$startup_output" == *'--> '* ]]
+[[ "$startup_output" == *'ok'* ]]
+[[ "$failure_output" == *'exit 1'* ]]
 [[ "$paste_output$backspace_output" != *'welcome to zig'* ]]
