@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     const install = registerInstall(b, zigsh);
 
     registerCheck(b, zigsh_module, zsh);
-    registerTests(b, &install.step);
+    registerTests(b, target, optimize, &install.step);
     registerRun(b, &install.step);
 }
 
@@ -99,11 +99,35 @@ fn registerCheck(
     check_step.dependOn(&zigsh_check.step);
 }
 
-fn registerTests(b: *std.Build, install_step: *std.Build.Step) void {
+fn registerTests(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    install_step: *std.Build.Step,
+) void {
     const test_step = b.step("test", "Load zigsh and exercise its native features");
+    registerUnitTest(b, test_step, target, optimize, "src/prompt/git.zig");
+    registerUnitTest(b, test_step, target, optimize, "src/prompt/template.zig");
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");
+}
+
+fn registerUnitTest(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    path: []const u8,
+) void {
+    const unit_test_module = b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+    });
+    const unit_tests = b.addTest(.{ .root_module = unit_test_module });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
 }
 
 fn registerTest(

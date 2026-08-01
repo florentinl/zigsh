@@ -49,7 +49,12 @@ wait-for-output
 backspace_output=$REPLY
 
 [[ "$startup_output" == *' '* ]]
-[[ "$startup_output" == *'--> '* ]]
-[[ "$startup_output" == *'ok'* ]]
-[[ "$failure_output" == *'exit 1'* ]]
+[[ "$startup_output" == *'╭─'* ]]
+[[ "$startup_output" == *"  ${project_root:t} "* ]]
+[[ "$startup_output" == *'main '* ]]
+[[ "$startup_output" == *$'\e[48;2;28;28;28m'* ]]
+[[ "$startup_output" == *$'\e[0m'* ]]
+[[ "$startup_output" == *'❯ '* ]]
+[[ "$startup_output" == *' '* ]]
+[[ "$failure_output" == *'✗ 1'* ]]
 [[ "$paste_output$backspace_output" != *'welcome to zig'* ]]
