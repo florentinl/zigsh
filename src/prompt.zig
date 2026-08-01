@@ -69,6 +69,7 @@ pub fn cleanup() void {
         preprompt_registered = false;
     }
     last_columns = 0;
+    metrics.clear();
 }
 
 fn redrawBeforeZle() c_int {
@@ -83,29 +84,31 @@ fn redrawBeforeZle() c_int {
 }
 
 fn renderPrompt() callconv(.c) void {
-    const render_started = clock.nowNanoseconds();
     var snapshot: metrics.Snapshot = .{};
     defer snapshot.deinit();
 
-    const context_started = clock.nowNanoseconds();
     var current = Context.init() catch return;
     defer current.deinit();
-    snapshot.context_ns = clock.elapsedSince(context_started);
-    snapshot.git_ns = current.git_duration_ns;
 
     var values: [segment_count]segment.Output = [_]segment.Output{.{}} ** segment_count;
     defer for (&values) |*value| value.deinit(allocator);
     for (definitions) |definition| {
         const segment_started = clock.nowNanoseconds();
         values[@intFromEnum(definition.name)] = definition.render(allocator, &current) catch return;
+        const dependency_duration = if (definition.name == .git_status) current.git_duration_ns else 0;
+        const rendered_text: ?[]const u8 = if (values[@intFromEnum(definition.name)].text) |text|
+            text
+        else if (definition.name == .git_status and current.git != null)
+            ""
+        else
+            null;
         snapshot.recordSegment(
             definition.name,
-            clock.elapsedSince(segment_started),
-            values[@intFromEnum(definition.name)].text,
+            clock.elapsedSince(segment_started) +| dependency_duration,
+            rendered_text,
         ) catch return;
     }
 
-    const layout_started = clock.nowNanoseconds();
     const columns = terminalColumns();
     fitToWidth(&values, columns);
 
@@ -130,8 +133,6 @@ fn renderPrompt() callconv(.c) void {
     assignPrompt("PROMPT", prompt.items);
     assignPrompt("RPROMPT", rprompt.items);
     last_columns = columns;
-    snapshot.layout_ns = clock.elapsedSince(layout_started);
-    snapshot.total_ns = clock.elapsedSince(render_started);
     metrics.replace(&snapshot);
 }
 

@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     const highlight_tools = registerHighlightTools(b, target, optimize, tree_sitter);
 
     registerCheck(b, zigsh_module, zsh, tree_sitter);
-    registerTests(b, &install.step, target, optimize, tree_sitter, highlight_tools);
+    registerTests(b, &install.step, target, optimize, zsh, tree_sitter, highlight_tools);
     registerDifferentialTest(b, &install.step);
     registerUpstreamCorpusTest(b, &install.step);
     registerRun(b, &install.step);
@@ -260,12 +260,14 @@ fn registerTests(
     install_step: *std.Build.Step,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    zsh: ZshConfiguration,
     tree_sitter: TreeSitterConfiguration,
     highlight_tools: HighlightTools,
 ) void {
     const test_step = b.step("test", "Load zigsh and exercise its native features");
     registerUnitTest(b, test_step, target, optimize, "src/prompt/git.zig");
     registerUnitTest(b, test_step, target, optimize, "src/prompt/template.zig");
+    registerZshUnitTest(b, test_step, target, optimize, zsh, "src/prompt/metrics.zig");
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");
@@ -287,6 +289,27 @@ fn registerTests(
     configureParserModule(unit_module, tree_sitter, tree_sitter.scanner_source);
     const unit_tests = b.addTest(.{ .root_module = unit_module });
     unit_tests.step.dependOn(&tree_sitter.prepare.step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_unit_tests.step);
+}
+
+fn registerZshUnitTest(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    zsh: ZshConfiguration,
+    path: []const u8,
+) void {
+    const unit_test_module = b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureZshModule(unit_test_module, zsh.include_path);
+    const unit_tests = b.addTest(.{ .root_module = unit_test_module });
+    dependOnZshPreparation(&unit_tests.step, zsh);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
 }

@@ -14,7 +14,7 @@ fn zigsh(
     _: zsh.Options,
     _: c_int,
 ) callconv(.c) c_int {
-    if (args[0] != null and std.mem.eql(u8, std.mem.span(args[0]), "timing")) {
+    if (args[0] != null and std.mem.eql(u8, std.mem.span(args[0]), "timings")) {
         return printTimings();
     }
     _ = zsh.printf("Hello from Zig!\n");
@@ -27,9 +27,9 @@ fn printTimings() c_int {
         return 1;
     };
 
-    var lines: [14]prompt.metrics.Line = undefined;
+    var lines: [prompt.metrics.max_lines]prompt.metrics.Line = undefined;
     const collected = prompt.metrics.collect(snapshot, &lines);
-    _ = zsh.printf("Prompt timings from the last render (>=1ms or output):\n");
+    _ = zsh.printf("Here are the timings of modules in your prompt (>=1ms or output):\n");
     for (collected) |line| {
         const rendered = formatTimingLine(line) catch return 1;
         defer std.heap.c_allocator.free(rendered);
@@ -44,9 +44,9 @@ fn formatTimingLine(line: prompt.metrics.Line) ![]u8 {
     const allocator = std.heap.c_allocator;
     const milliseconds = line.duration_ns / std.time.ns_per_ms;
     const base = if (milliseconds == 0)
-        try std.fmt.allocPrint(allocator, "{s: >12}  -  <1ms", .{line.name})
+        try std.fmt.allocPrint(allocator, " {s: <11} -   <1ms", .{line.name})
     else
-        try std.fmt.allocPrint(allocator, "{s: >12}  -  {d: >4}ms", .{ line.name, milliseconds });
+        try std.fmt.allocPrint(allocator, " {s: <11} -  {d: >3}ms", .{ line.name, milliseconds });
     defer allocator.free(base);
     if (line.text) |text| return std.fmt.allocPrint(allocator, "{s}  -   \"{s}\"", .{ base, text });
     return allocator.dupe(u8, base);

@@ -20,10 +20,10 @@ zmodload zigsh
 [[ -o hist_verify ]]
 [[ -o share_history ]]
 
-timing_output=$(zigsh timing)
-[[ $timing_output == *'Prompt timings from the last render'* ]]
-[[ $timing_output == *'prompt'* ]]
+timing_output=$(zigsh timings)
+[[ $timing_output == *'Here are the timings of modules in your prompt'* ]]
 [[ $timing_output == *'directory'* ]]
+[[ $timing_output == *'git_status'* ]]
 
 normal_cursor_up=$'\e[A'
 normal_cursor_down=$'\e[B'

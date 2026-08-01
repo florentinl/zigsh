@@ -3,6 +3,7 @@ const segment = @import("segment.zig");
 
 const allocator = std.heap.c_allocator;
 const segment_count = @typeInfo(segment.Name).@"enum".fields.len;
+pub const max_lines = segment_count;
 
 pub const Entry = struct {
     duration_ns: u64 = 0,
@@ -15,10 +16,6 @@ pub const Entry = struct {
 };
 
 pub const Snapshot = struct {
-    total_ns: u64 = 0,
-    context_ns: u64 = 0,
-    git_ns: u64 = 0,
-    layout_ns: u64 = 0,
     segments: [segment_count]Entry = [_]Entry{.{}} ** segment_count,
 
     pub fn deinit(self: *Snapshot) void {
@@ -49,16 +46,17 @@ pub fn replace(next: *Snapshot) void {
     has_snapshot = true;
 }
 
+pub fn clear() void {
+    latest_snapshot.deinit();
+    has_snapshot = false;
+}
+
 pub fn latest() ?*const Snapshot {
     return if (has_snapshot) &latest_snapshot else null;
 }
 
 pub fn collect(snapshot: *const Snapshot, output: []Line) []Line {
     var count: usize = 0;
-    appendLine(output, &count, .{ .name = "prompt", .duration_ns = snapshot.total_ns });
-    appendIfRelevant(output, &count, .{ .name = "context", .duration_ns = snapshot.context_ns });
-    appendIfRelevant(output, &count, .{ .name = "git", .duration_ns = snapshot.git_ns });
-    appendIfRelevant(output, &count, .{ .name = "layout", .duration_ns = snapshot.layout_ns });
     inline for (@typeInfo(segment.Name).@"enum".fields) |field| {
         const name: segment.Name = @enumFromInt(field.value);
         const entry = snapshot.segments[@intFromEnum(name)];
@@ -68,7 +66,7 @@ pub fn collect(snapshot: *const Snapshot, output: []Line) []Line {
             .text = entry.text,
         });
     }
-    sortByDuration(output[1..count]);
+    sortByDuration(output[0..count]);
     return output[0..count];
 }
 
@@ -97,11 +95,44 @@ fn printableCopy(text: []const u8) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     for (text) |byte| {
-        if (byte < 0x20 or byte == 0x7f) {
-            try output.append(allocator, '?');
-        } else {
-            try output.append(allocator, byte);
+        switch (byte) {
+            '\\' => try output.appendSlice(allocator, "\\\\"),
+            '"' => try output.appendSlice(allocator, "\\\""),
+            '\n' => try output.appendSlice(allocator, "\\n"),
+            '\r' => try output.appendSlice(allocator, "\\r"),
+            '\t' => try output.appendSlice(allocator, "\\t"),
+            0...8, 11...12, 14...0x1f, 0x7f => try output.append(allocator, '?'),
+            else => try output.append(allocator, byte),
         }
     }
     return output.toOwnedSlice(allocator);
+}
+
+test "collect filters empty fast modules and sorts the rest by duration" {
+    var snapshot: Snapshot = .{};
+    defer snapshot.deinit();
+    snapshot.segments[@intFromEnum(segment.Name.git_status)].duration_ns = 12 * std.time.ns_per_ms;
+    snapshot.segments[@intFromEnum(segment.Name.directory)].duration_ns = 2 * std.time.ns_per_ms;
+    snapshot.segments[@intFromEnum(segment.Name.os)].duration_ns = std.time.ns_per_ms - 1;
+    snapshot.segments[@intFromEnum(segment.Name.character)].text = try allocator.dupe(u8, " ");
+
+    var storage: [segment_count]Line = undefined;
+    const lines = collect(&snapshot, &storage);
+
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expectEqualStrings("git_status", lines[0].name);
+    try std.testing.expectEqualStrings("directory", lines[1].name);
+    try std.testing.expectEqualStrings("character", lines[2].name);
+}
+
+test "recordSegment escapes quoted output" {
+    var snapshot: Snapshot = .{};
+    defer snapshot.deinit();
+
+    try snapshot.recordSegment(.directory, 0, "a\\b\n\"c\"");
+
+    try std.testing.expectEqualStrings(
+        "a\\\\b\\n\\\"c\\\"",
+        snapshot.segments[@intFromEnum(segment.Name.directory)].text.?,
+    );
 }

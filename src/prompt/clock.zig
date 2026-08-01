@@ -11,5 +11,8 @@ pub fn nowNanoseconds() u64 {
 }
 
 pub fn elapsedSince(start: u64) u64 {
-    return nowNanoseconds() -| start;
+    if (start == 0) return 0;
+    const end = nowNanoseconds();
+    if (end == 0) return 0;
+    return end -| start;
 }
