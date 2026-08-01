@@ -7,30 +7,20 @@ const zsh = @cImport({
 const up_widget_name: [:0]const u8 = "zigsh-up-line-or-beginning-search";
 const down_widget_name: [:0]const u8 = "zigsh-down-line-or-beginning-search";
 
-var up_widget: zsh.Widget = null;
-var down_widget: zsh.Widget = null;
+var up_widget: zle.Widget = .{};
+var down_widget: zle.Widget = .{};
 var searching_widget: zsh.Thingy = null;
 var saved_cursor: c_int = 0;
 
 pub fn setup() c_int {
     configureHistory();
 
-    up_widget = zsh.addzlefunction(
-        @constCast(up_widget_name.ptr),
-        upLineOrBeginningSearch,
-        0,
-    );
-    if (up_widget == null) return 1;
+    up_widget.register(up_widget_name, upLineOrBeginningSearch) catch return 1;
 
-    down_widget = zsh.addzlefunction(
-        @constCast(down_widget_name.ptr),
-        downLineOrBeginningSearch,
-        0,
-    );
-    if (down_widget == null) {
+    down_widget.register(down_widget_name, downLineOrBeginningSearch) catch {
         cleanup();
         return 1;
-    }
+    };
 
     bindNavigationKeys() catch {
         cleanup();
@@ -42,14 +32,8 @@ pub fn setup() c_int {
 pub fn cleanup() void {
     searching_widget = null;
 
-    if (down_widget != null) {
-        zsh.deletezlefunction(down_widget);
-        down_widget = null;
-    }
-    if (up_widget != null) {
-        zsh.deletezlefunction(up_widget);
-        up_widget = null;
-    }
+    down_widget.unregister();
+    up_widget.unregister();
 }
 
 fn configureHistory() void {

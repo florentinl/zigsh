@@ -268,6 +268,7 @@ fn registerTests(
     registerUnitTest(b, test_step, target, optimize, "src/prompt/git.zig");
     registerUnitTest(b, test_step, target, optimize, "src/prompt/template.zig");
     registerZshUnitTest(b, test_step, target, optimize, zsh, "src/prompt/metrics.zig");
+    registerZshUnitTest(b, test_step, target, optimize, zsh, "src/zle_hooks.zig");
     registerTest(b, test_step, install_step, "test/test.zsh");
     registerTest(b, test_step, install_step, "test/test-history.zsh");
     registerTest(b, test_step, install_step, "test/test-prompt.zsh");

@@ -3,9 +3,6 @@ const std = @import("std");
 const zsh = @cImport({
     @cInclude("zsh.mdh");
 });
-const zle = @cImport({
-    @cInclude("Zle/zle.mdh");
-});
 
 const config = @import("prompt/config.zig");
 const clock = @import("prompt/clock.zig");
@@ -21,6 +18,7 @@ const git_provider = @import("prompt/segments/git_provider.zig");
 const git_state = @import("prompt/segments/git_state.zig");
 const git_status = @import("prompt/segments/git_status.zig");
 const os = @import("prompt/segments/os.zig");
+const resize = @import("prompt/resize.zig");
 const status = @import("prompt/segments/status.zig");
 const sudo = @import("prompt/segments/sudo.zig");
 const zle_hooks = @import("zle_hooks.zig");
@@ -44,7 +42,7 @@ const definitions = [_]segment.Definition{
 
 var preprompt_registered = false;
 var last_columns: usize = 0;
-var redraw_in_progress = false;
+var redraw_subscription = zle_hooks.Subscription.init(redrawBeforeZle);
 
 pub fn setup() c_int {
     if (preprompt_registered) return 0;
@@ -55,15 +53,20 @@ pub fn setup() c_int {
     zsh.addprepromptfn(renderPrompt);
     preprompt_registered = true;
 
-    zle_hooks.add(redrawBeforeZle) catch {
+    redraw_subscription.register() catch {
         cleanup();
         return 1;
     };
+    if (resize.setup(redrawAfterResize) != 0) {
+        cleanup();
+        return 1;
+    }
     return 0;
 }
 
 pub fn cleanup() void {
-    zle_hooks.remove(redrawBeforeZle);
+    resize.cleanup();
+    redraw_subscription.unregister();
     if (preprompt_registered) {
         zsh.delprepromptfn(renderPrompt);
         preprompt_registered = false;
@@ -72,29 +75,37 @@ pub fn cleanup() void {
     metrics.clear();
 }
 
-fn redrawBeforeZle() c_int {
-    const columns = terminalColumns();
-    if (redraw_in_progress or columns == last_columns) return 0;
+fn redrawAfterResize() bool {
+    return updatePromptForColumnChange();
+}
 
-    redraw_in_progress = true;
-    defer redraw_in_progress = false;
-    renderPrompt();
-    zle.zle_resetprompt();
-    return 0;
+fn redrawBeforeZle() zle_hooks.Effects {
+    return if (updatePromptForColumnChange()) .{ .prompt_changed = true } else .{};
+}
+
+fn updatePromptForColumnChange() bool {
+    const columns = terminalColumns();
+    if (columns == last_columns) return false;
+
+    return updatePrompt();
 }
 
 fn renderPrompt() callconv(.c) void {
+    _ = updatePrompt();
+}
+
+fn updatePrompt() bool {
     var snapshot: metrics.Snapshot = .{};
     defer snapshot.deinit();
 
-    var current = Context.init() catch return;
+    var current = Context.init() catch return false;
     defer current.deinit();
 
     var values: [segment_count]segment.Output = [_]segment.Output{.{}} ** segment_count;
     defer for (&values) |*value| value.deinit(allocator);
     for (definitions) |definition| {
         const segment_started = clock.nowNanoseconds();
-        values[@intFromEnum(definition.name)] = definition.render(allocator, &current) catch return;
+        values[@intFromEnum(definition.name)] = definition.render(allocator, &current) catch return false;
         const dependency_duration = if (definition.name == .git_status) current.git_duration_ns else 0;
         const rendered_text: ?[]const u8 = if (values[@intFromEnum(definition.name)].text) |text|
             text
@@ -106,7 +117,7 @@ fn renderPrompt() callconv(.c) void {
             definition.name,
             clock.elapsedSince(segment_started) +| dependency_duration,
             rendered_text,
-        ) catch return;
+        ) catch return false;
     }
 
     const columns = terminalColumns();
@@ -115,25 +126,26 @@ fn renderPrompt() callconv(.c) void {
     var prompt: std.ArrayList(u8) = .empty;
     defer prompt.deinit(allocator);
     if (template.measure(config.top_template, &values) > columns) {
-        template.render(&prompt, allocator, "{{character}}", &values, 0) catch return;
+        template.render(&prompt, allocator, "{{character}}", &values, 0) catch return false;
     } else {
         const top_width = template.measure(config.top_template, &values);
-        template.render(&prompt, allocator, config.top_template, &values, columns - top_width) catch return;
-        prompt.append(allocator, '\n') catch return;
-        template.render(&prompt, allocator, config.bottom_template, &values, 0) catch return;
+        template.render(&prompt, allocator, config.top_template, &values, columns - top_width) catch return false;
+        prompt.append(allocator, '\n') catch return false;
+        template.render(&prompt, allocator, config.bottom_template, &values, 0) catch return false;
     }
 
     var rprompt: std.ArrayList(u8) = .empty;
     defer rprompt.deinit(allocator);
     const right_width = template.measure(config.right_template, &values);
     if (right_width < columns and template.measure(config.top_template, &values) < columns) {
-        template.render(&rprompt, allocator, config.right_template, &values, 0) catch return;
+        template.render(&rprompt, allocator, config.right_template, &values, 0) catch return false;
     }
 
     assignPrompt("PROMPT", prompt.items);
     assignPrompt("RPROMPT", rprompt.items);
     last_columns = columns;
     metrics.replace(&snapshot);
+    return true;
 }
 
 fn fitToWidth(values: *[segment_count]segment.Output, columns: usize) void {

@@ -13,6 +13,7 @@ pub const Name = enum {
     @"error",
     sudo,
     character,
+    character_error,
 };
 
 pub const Rgb = struct {

@@ -26,6 +26,13 @@ function wait-for-output {
   return 1
 }
 
+function set-terminal-columns {
+  local tty_path=$1
+  local columns=$2
+  stty -f "$tty_path" columns "$columns" 2>/dev/null ||
+    stty -F "$tty_path" columns "$columns"
+}
+
 zpty -b prompt_shell env \
   HOME="$test_home" \
   TERM=xterm-256color \
@@ -35,6 +42,17 @@ zpty -b prompt_shell env \
 
 wait-for-output
 startup_output=$REPLY
+
+zpty -w prompt_shell "tty >| ${(q)test_home}/tty"
+wait-for-output
+prompt_tty=$(<$test_home/tty)
+
+set-terminal-columns "$prompt_tty" 16
+wait-for-output
+resize_output=$REPLY
+
+set-terminal-columns "$prompt_tty" 80
+wait-for-output
 
 zpty -wn prompt_shell $'\e[200~false\n\e[201~'
 wait-for-output
@@ -56,5 +74,7 @@ backspace_output=$REPLY
 [[ "$startup_output" == *$'\e[0m'* ]]
 [[ "$startup_output" == *'❯ '* ]]
 [[ "$startup_output" == *' '* ]]
+[[ "$resize_output" == *'  zi…'* ]]
 [[ "$failure_output" == *'✗ 1'* ]]
+[[ "$failure_output" == *$'\e[1;38;2;255;102;102m❯\e[0m '* ]]
 [[ "$paste_output$backspace_output" != *'welcome to zig'* ]]

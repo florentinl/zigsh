@@ -21,6 +21,7 @@ var engine: ?Engine = null;
 var alias_engine: ?alias_expansion.Engine = null;
 var active = false;
 var regions_current = false;
+var redraw_subscription = zle_hooks.Subscription.init(linePreRedraw);
 
 pub fn setup() c_int {
     if (active or highlightingDisabled()) return 0;
@@ -39,7 +40,7 @@ pub fn setup() c_int {
         regions.resetTheme();
         return 1;
     };
-    zle_hooks.add(linePreRedraw) catch {
+    redraw_subscription.register() catch {
         alias_engine.?.deinit();
         alias_engine = null;
         engine.?.deinit();
@@ -54,7 +55,7 @@ pub fn setup() c_int {
 
 pub fn cleanup() void {
     if (!active) return;
-    zle_hooks.remove(linePreRedraw);
+    redraw_subscription.unregister();
     regions.cleanup();
     if (alias_engine) |*active_alias_engine| active_alias_engine.deinit();
     alias_engine = null;
@@ -72,15 +73,15 @@ fn highlightingDisabled() bool {
         std.ascii.eqlIgnoreCase(setting, "off");
 }
 
-fn linePreRedraw() c_int {
+fn linePreRedraw() zle_hooks.Effects {
     if (zsh.zlecontext == zsh.ZLCON_SELECT or zsh.zlecontext == zsh.ZLCON_VARED) {
         clearRegions();
-        return 0;
+        return .{};
     }
 
     const line_length = std.math.cast(usize, zsh.zlell) orelse {
         clearRegions();
-        return 0;
+        return .{};
     };
     const line: []const zsh.ZLE_CHAR_T = if (line_length == 0)
         &.{}
@@ -88,16 +89,16 @@ fn linePreRedraw() c_int {
         zsh.zleline[0..line_length];
     var snapshot = Snapshot.fromCodepoints(std.heap.c_allocator, line) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     defer snapshot.deinit(std.heap.c_allocator);
 
-    const active_engine = if (engine) |*value| value else return 0;
-    if (regions_current and active_engine.isCurrentSource(snapshot.bytes)) return 0;
+    const active_engine = if (engine) |*value| value else return .{};
+    if (regions_current and active_engine.isCurrentSource(snapshot.bytes)) return .{};
 
     var result = active_engine.highlight(snapshot.bytes) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     defer result.deinit(std.heap.c_allocator);
 
@@ -107,23 +108,23 @@ fn linePreRedraw() c_int {
         snapshot.bytes,
         active_engine.rootNode() catch {
             clearRegions();
-            return 0;
+            return .{};
         },
         &state,
     ) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     defer semantic_analysis.deinit(std.heap.c_allocator);
 
     const expanded_spans = if (semantic_analysis.expansion_candidates.len != 0) expanded: {
         const active_alias_engine = if (alias_engine) |*value| value else {
             clearRegions();
-            return 0;
+            return .{};
         };
         break :expanded active_alias_engine.highlight(snapshot.bytes, &state) catch {
             clearRegions();
-            return 0;
+            return .{};
         };
     } else null;
     defer if (expanded_spans) |owned| std.heap.c_allocator.free(owned);
@@ -134,7 +135,7 @@ fn linePreRedraw() c_int {
         result.spans.len + semantic_analysis.spans.len + expanded_span_count,
     ) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     defer std.heap.c_allocator.free(candidates);
     const syntax_end = result.spans.len;
@@ -147,17 +148,17 @@ fn linePreRedraw() c_int {
 
     const composed = spans.compose(std.heap.c_allocator, @intCast(snapshot.bytes.len), candidates) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     std.heap.c_allocator.free(result.spans);
     result.spans = composed;
 
     regions.apply(snapshot, result.spans) catch {
         clearRegions();
-        return 0;
+        return .{};
     };
     regions_current = true;
-    return 0;
+    return .{};
 }
 
 fn clearRegions() void {

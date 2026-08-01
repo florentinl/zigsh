@@ -157,6 +157,7 @@ fn appendStyle(output: *std.ArrayList(u8), allocator: std.mem.Allocator, name: s
         .@"error" => config.styles.@"error",
         .sudo => config.styles.sudo,
         .character => config.styles.character,
+        .character_error => config.styles.character_error,
     };
     var buffer: [64]u8 = undefined;
     var sequence: std.ArrayList(u8) = .empty;
@@ -279,4 +280,22 @@ test "closing a style restores its parent instead of leaking color" {
 test "Nerd Font glyphs occupy one terminal cell" {
     try std.testing.expectEqual(@as(usize, 3), displayWidth(""));
     try std.testing.expectEqual(@as(usize, 2), displayWidth("界"));
+}
+
+test "character separator remains outside the error background" {
+    const allocator = std.testing.allocator;
+    const count = @typeInfo(segment.Name).@"enum".fields.len;
+    var values: [count]segment.Output = [_]segment.Output{.{}} ** count;
+    defer for (&values) |*value| value.deinit(allocator);
+    values[@intFromEnum(segment.Name.character)] = .{
+        .text = try allocator.dupe(u8, "❯"),
+        .style_name = .character_error,
+    };
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try render(&output, allocator, "{{character}} ", &values, 0);
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "48;2") == null);
+    try std.testing.expect(std.mem.endsWith(u8, output.items, "%{\x1b[0m%} "));
 }

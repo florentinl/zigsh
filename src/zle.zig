@@ -9,6 +9,37 @@ pub const BindKeyError = error{
     EmptyKeySequence,
 };
 
+pub const WidgetCallback = *const fn ([*c][*c]u8) callconv(.c) c_int;
+
+pub const Widget = struct {
+    handle: zsh.Widget = null,
+
+    pub fn register(self: *Widget, name: [:0]const u8, callback: WidgetCallback) error{RegistrationFailed}!void {
+        if (self.handle != null) return;
+        self.handle = zsh.addzlefunction(@constCast(name.ptr), callback, 0);
+        if (self.handle == null) return error.RegistrationFailed;
+    }
+
+    pub fn unregister(self: *Widget) void {
+        if (self.handle) |registered| zsh.deletezlefunction(registered);
+        self.handle = null;
+    }
+};
+
+/// Refresh ZLE's cached prompt expansion without drawing the screen. The
+/// caller must already be in a path, such as zle-line-pre-redraw, that Zsh
+/// follows with its normal refresh.
+pub fn reexpandPrompt() void {
+    zsh.reexpandprompt();
+}
+
+/// Re-expand the prompt and redisplay immediately. Do not call this from
+/// zle-line-pre-redraw: Zsh already refreshes after that hook, so use
+/// reexpandPrompt there to avoid a nested refresh.
+pub fn resetPrompt() void {
+    zsh.zle_resetprompt();
+}
+
 /// Bind a raw key sequence to an existing widget in ZLE's `main` keymap.
 pub fn bindKey(sequence: []const u8, widget_name: [:0]const u8) BindKeyError!void {
     return bindKeyInMap("main", sequence, widget_name);

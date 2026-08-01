@@ -18,13 +18,14 @@ pub const styles = .{
     .@"error" = style.Style{ .foreground = .{ .red = 0xff, .green = 0x66, .blue = 0x66 }, .background = .{ .red = 0x1c, .green = 0x1c, .blue = 0x1c } },
     .sudo = style.Style{ .foreground = .{ .red = 0xff, .green = 0xde, .blue = 0x57 } },
     .character = style.Style{ .foreground = .{ .red = 0x55, .green = 0xdd, .blue = 0x88 }, .bold = true },
+    .character_error = style.Style{ .foreground = .{ .red = 0xff, .green = 0x66, .blue = 0x66 }, .bold = true },
 };
 
 /// Template tags: {{segment}}, {{if.segment}}...{{/if}},
 /// {{style.name}}...{{/style}}, and {{fill}}. Literal text is safe by default.
 pub const top_template =
     "{{style.line}}╭─{{/style}}{{style.panel}} {{os}}{{if.directory}}{{style.separator}} {{/style}}{{directory}}{{/if}}{{if.git}}{{style.separator}} {{/style}}{{git_provider}}{{git_branch}}{{git_commit}}{{git_state}}{{git_status}}{{/if}}{{/style}}{{style.cap_right}}{{/style}}{{fill}}{{style.cap_left}}{{/style}}{{status}}{{style.line}}─╮{{/style}}";
-pub const bottom_template = "{{style.line}}╰─{{/style}}{{sudo}}{{character}}";
+pub const bottom_template = "{{style.line}}╰─{{/style}}{{sudo}}{{character}} ";
 pub const right_template = "{{style.line}}─╯{{/style}}";
 
 /// Lowest priority entries disappear first. Directory and Git operation state
