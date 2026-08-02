@@ -54,6 +54,7 @@ var git_generation: u64 = 0;
 var pending_git_generation: ?u64 = null;
 var pending_git_cwd: ?[]u8 = null;
 var pending_git_started_ns: u64 = 0;
+var pending_git_worker_epoch: u64 = 0;
 var git_cache: ?GitCache = null;
 var last_initial_total_ns: u64 = 0;
 var last_sync_wait_ns: u64 = 0;
@@ -212,6 +213,14 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
 }
 
 fn refreshGit(cwd: []const u8) void {
+    if (pending_git_generation != null and pending_git_worker_epoch != async_manager.epoch()) {
+        clearPendingGit();
+    }
+    if (pending_git_cwd) |pending_cwd| {
+        if (std.mem.eql(u8, pending_cwd, cwd) and async_manager.activeJob() == .prompt_git) return;
+    }
+    // Besides cancellation, this fork refreshes the worker's snapshot of Zsh
+    // options, aliases, functions, and commands after the previous command.
     if (!async_manager.cancelAndRestart()) {
         clearPendingGit();
         return;
@@ -223,6 +232,7 @@ fn refreshGit(cwd: []const u8) void {
     pending_git_cwd = allocator.dupe(u8, cwd) catch return;
     pending_git_generation = git_generation;
     pending_git_started_ns = clock.nowNanoseconds();
+    pending_git_worker_epoch = async_manager.epoch();
 
     const deadline = async_manager.deadlineAfter(foreground_git_budget_ns);
     var frame = async_manager.submitAndWait(.prompt_git, git_generation, cwd, deadline) catch {
@@ -289,6 +299,7 @@ fn clearPendingGit() void {
     pending_git_cwd = null;
     pending_git_generation = null;
     pending_git_started_ns = 0;
+    pending_git_worker_epoch = 0;
 }
 
 fn fitToWidth(values: *[segment_count]segment.Output, columns: usize) void {

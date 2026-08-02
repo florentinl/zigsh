@@ -37,12 +37,14 @@ pub const ReceiveError = error{
 const StartError = error{
     ConfigureFailed,
     ForkFailed,
+    ProcessGroupFailed,
     SocketPairFailed,
 };
 
 pub const Client = struct {
     fd: c_int = -1,
     worker_pid: c.pid_t = -1,
+    worker_pgid: c.pid_t = -1,
     owner_pid: c.pid_t = -1,
 
     pub fn start(self: *Client) StartError!void {
@@ -63,10 +65,17 @@ pub const Client = struct {
         if (pid < 0) return error.ForkFailed;
         if (pid == 0) {
             _ = c.close(sockets[0]);
+            if (c.setpgid(0, 0) != 0) c._exit(1);
             prepareWorkerProcess();
             const status = workerLoop(sockets[1]);
             _ = c.close(sockets[1]);
             c._exit(status);
+        }
+
+        if (c.setpgid(pid, pid) != 0) {
+            _ = c.kill(pid, c.SIGTERM);
+            reap(pid);
+            return error.ProcessGroupFailed;
         }
 
         _ = c.close(sockets[1]);
@@ -74,6 +83,7 @@ pub const Client = struct {
         self.fd = sockets[0];
         sockets[0] = -1;
         self.worker_pid = pid;
+        self.worker_pgid = pid;
         self.owner_pid = current_pid;
     }
 
@@ -87,10 +97,12 @@ pub const Client = struct {
             self.fd = -1;
         }
         if (self.worker_pid > 0) {
-            _ = c.kill(self.worker_pid, c.SIGTERM);
+            const target = if (self.worker_pgid > 0) -self.worker_pgid else self.worker_pid;
+            _ = c.kill(target, c.SIGTERM);
             reap(self.worker_pid);
         }
         self.worker_pid = -1;
+        self.worker_pgid = -1;
         self.owner_pid = -1;
     }
 
@@ -332,10 +344,71 @@ test "per-process worker transports framed jobs" {
     try std.testing.expectEqualStrings("worker-ready", response.payload);
 }
 
+test "worker has an isolated process group for descendant cancellation" {
+    var client: Client = .{};
+    defer client.stop();
+    try client.start();
+
+    try std.testing.expectEqual(client.worker_pid, client.worker_pgid);
+    try std.testing.expectEqual(client.worker_pgid, c.getpgid(client.worker_pid));
+    try std.testing.expect(client.worker_pgid != c.getpgrp());
+}
+
+test "stopping a worker terminates every process in its cancellation group" {
+    var client: Client = .{};
+    try client.start();
+    defer client.stop();
+
+    var ready = [2]c_int{ -1, -1 };
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&ready));
+    defer {
+        if (ready[0] >= 0) _ = c.close(ready[0]);
+        if (ready[1] >= 0) _ = c.close(ready[1]);
+    }
+
+    const member = c.fork();
+    try std.testing.expect(member >= 0);
+    if (member == 0) {
+        _ = c.close(ready[0]);
+        if (c.setpgid(0, client.worker_pgid) != 0) c._exit(2);
+        const byte: u8 = 1;
+        if (c.write(ready[1], &byte, 1) != 1) c._exit(3);
+        while (true) _ = c.pause();
+    }
+
+    _ = c.close(ready[1]);
+    ready[1] = -1;
+    var byte: u8 = 0;
+    if (c.read(ready[0], &byte, 1) != 1) {
+        reap(member);
+        return error.TestUnexpectedResult;
+    }
+
+    var member_reaped = false;
+    defer if (!member_reaped) {
+        _ = c.kill(member, c.SIGKILL);
+        reap(member);
+    };
+    client.stop();
+
+    var status: c_int = 0;
+    for (0..100) |_| {
+        const waited = c.waitpid(member, &status, c.WNOHANG);
+        if (waited == member) {
+            member_reaped = true;
+            break;
+        }
+        try std.testing.expect(waited >= 0);
+        _ = c.usleep(10 * 1000);
+    }
+    try std.testing.expect(member_reaped);
+}
+
 test "worker clients abandon inherited ownership without signalling the parent worker" {
-    var client = Client{ .fd = -1, .worker_pid = 123, .owner_pid = c.getpid() + 1 };
+    var client = Client{ .fd = -1, .worker_pid = 123, .worker_pgid = 123, .owner_pid = c.getpid() + 1 };
     try std.testing.expect(client.responseFd() == null);
     _ = client.receive(std.testing.allocator) catch unreachable;
     try std.testing.expectEqual(@as(c.pid_t, -1), client.worker_pid);
+    try std.testing.expectEqual(@as(c.pid_t, -1), client.worker_pgid);
     try std.testing.expectEqual(@as(c.pid_t, -1), client.owner_pid);
 }
