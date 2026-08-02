@@ -31,25 +31,25 @@ const Context = context.Context;
 const segment_count = @typeInfo(segment.Name).@"enum".fields.len;
 const foreground_git_budget_ns = 8 * std.time.ns_per_ms;
 
-const definitions = [_]segment.Definition{
-    .{ .name = .os, .render = os.render },
-    .{ .name = .directory, .render = directory.render },
-    .{ .name = .git_provider, .render = git_provider.render },
-    .{ .name = .git_branch, .render = git_branch.render },
-    .{ .name = .git_commit, .render = git_commit.render },
-    .{ .name = .git_state, .render = git_state.render },
-    .{ .name = .git_status, .render = git_status.render },
-    .{ .name = .status, .render = status.render },
-    .{ .name = .sudo, .render = sudo.render },
-    .{ .name = .character, .render = character.render },
-};
+const renderers = std.EnumArray(segment.Name, segment.Renderer).init(.{
+    .os = os.render,
+    .directory = directory.render,
+    .git_provider = git_provider.render,
+    .git_branch = git_branch.render,
+    .git_commit = git_commit.render,
+    .git_state = git_state.render,
+    .git_status = git_status.render,
+    .status = status.render,
+    .sudo = sudo.render,
+    .character = character.render,
+});
 
 var preprompt_registered = false;
 var last_columns: usize = 0;
 var last_prompt: ?[]u8 = null;
 var last_rprompt: ?[]u8 = null;
 var redraw_subscription = zle_hooks.Subscription.init(redrawBeforeZle);
-var completion_subscription = async_manager.CompletionSubscription.init(workerCompleted);
+var git_job = async_manager.Job.init(.prompt_git, workerCompleted);
 var git_generation: u64 = 0;
 var pending_git_generation: ?u64 = null;
 var pending_git_cwd: ?[]u8 = null;
@@ -75,6 +75,7 @@ const GitCache = struct {
 pub fn setup() c_int {
     if (preprompt_registered) return 0;
 
+    git_job.register() catch return 1;
     zsh.opts[zsh.PROMPTSUBST] = 0;
     zsh.rprompt_indent = 0;
     renderPrompt();
@@ -82,10 +83,6 @@ pub fn setup() c_int {
     preprompt_registered = true;
 
     redraw_subscription.register() catch {
-        cleanup();
-        return 1;
-    };
-    completion_subscription.register() catch {
         cleanup();
         return 1;
     };
@@ -98,7 +95,7 @@ pub fn setup() c_int {
 
 pub fn cleanup() void {
     resize.cleanup();
-    completion_subscription.unregister();
+    git_job.unregister();
     redraw_subscription.unregister();
     if (preprompt_registered) {
         zsh.delprepromptfn(renderPrompt);
@@ -155,17 +152,17 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
     var values: [segment_count]segment.Output = [_]segment.Output{.{}} ** segment_count;
     defer for (&values) |*value| value.deinit(allocator);
     const segments_started = clock.nowNanoseconds();
-    for (definitions) |definition| {
+    inline for (std.enums.values(segment.Name)) |name| {
         const segment_started = clock.nowNanoseconds();
-        values[@intFromEnum(definition.name)] = definition.render(allocator, &current) catch return false;
-        const rendered_text: ?[]const u8 = if (values[@intFromEnum(definition.name)].text) |text|
+        values[@intFromEnum(name)] = renderers.get(name)(allocator, &current) catch return false;
+        const rendered_text: ?[]const u8 = if (values[@intFromEnum(name)].text) |text|
             text
-        else if (definition.name == .git_status and current.git != null)
+        else if (name == .git_status and current.git != null)
             ""
         else
             null;
         snapshot.recordSegment(
-            definition.name,
+            name,
             clock.elapsedSince(segment_started),
             rendered_text,
         ) catch return false;
@@ -213,15 +210,15 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
 }
 
 fn refreshGit(cwd: []const u8) void {
-    if (pending_git_generation != null and pending_git_worker_epoch != async_manager.epoch()) {
+    if (pending_git_generation != null and pending_git_worker_epoch != git_job.epoch()) {
         clearPendingGit();
     }
     if (pending_git_cwd) |pending_cwd| {
-        if (std.mem.eql(u8, pending_cwd, cwd) and async_manager.activeJob() == .prompt_git) return;
+        if (std.mem.eql(u8, pending_cwd, cwd) and git_job.busy()) return;
     }
     // Besides cancellation, this fork refreshes the worker's snapshot of Zsh
     // options, aliases, functions, and commands after the previous command.
-    if (!async_manager.cancelAndRestart()) {
+    if (!git_job.cancelAndRestart()) {
         clearPendingGit();
         return;
     }
@@ -232,10 +229,10 @@ fn refreshGit(cwd: []const u8) void {
     pending_git_cwd = allocator.dupe(u8, cwd) catch return;
     pending_git_generation = git_generation;
     pending_git_started_ns = clock.nowNanoseconds();
-    pending_git_worker_epoch = async_manager.epoch();
+    pending_git_worker_epoch = git_job.epoch();
 
     const deadline = async_manager.deadlineAfter(foreground_git_budget_ns);
-    var frame = async_manager.submitAndWait(.prompt_git, git_generation, cwd, deadline) catch {
+    var frame = git_job.submitAndWait(git_generation, cwd, deadline) catch {
         clearPendingGit();
         return;
     } orelse return;

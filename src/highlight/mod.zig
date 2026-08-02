@@ -22,11 +22,14 @@ var desired_snapshot: ?Snapshot = null;
 var inflight_snapshot: ?Snapshot = null;
 var inflight_generation: ?u64 = null;
 var inflight_worker_epoch: u64 = 0;
+var warm_generation: ?u64 = null;
 var generation: u64 = 0;
+var preprompt_registered = false;
 var redraw_subscription = zle_hooks.Subscription.init(linePreRedraw);
-var completion_subscription = async_manager.CompletionSubscription.init(workerCompleted);
+var highlight_job = async_manager.Job.init(.highlight, workerCompleted);
 
 const foreground_budget_ns = 3 * std.time.ns_per_ms;
+const warm_budget_ns = 3 * std.time.ns_per_ms;
 const allocator = std.heap.c_allocator;
 
 pub fn setup() c_int {
@@ -40,11 +43,13 @@ pub fn setup() c_int {
         regions.resetTheme();
         return 1;
     };
-    completion_subscription.register() catch {
+    highlight_job.register() catch {
         redraw_subscription.unregister();
         regions.resetTheme();
         return 1;
     };
+    zsh.addprepromptfn(refreshWorker);
+    preprompt_registered = true;
     active = true;
     regions_current = false;
     return 0;
@@ -52,7 +57,11 @@ pub fn setup() c_int {
 
 pub fn cleanup() void {
     if (!active) return;
-    completion_subscription.unregister();
+    if (preprompt_registered) {
+        zsh.delprepromptfn(refreshWorker);
+        preprompt_registered = false;
+    }
+    highlight_job.unregister();
     redraw_subscription.unregister();
     regions.cleanup();
     clearDesired();
@@ -60,6 +69,27 @@ pub fn cleanup() void {
     clearCurrentSource();
     active = false;
     regions_current = false;
+    warm_generation = null;
+}
+
+fn refreshWorker() callconv(.c) void {
+    clearDesired();
+    clearInflight();
+    clearCurrentSource();
+    regions_current = false;
+    warm_generation = null;
+    if (!highlight_job.cancelAndRestart()) return;
+
+    generation +%= 1;
+    if (generation == 0) generation = 1;
+    warm_generation = generation;
+    const deadline = async_manager.deadlineAfter(warm_budget_ns);
+    var frame = highlight_job.submitAndWait(generation, &.{}, deadline) catch {
+        warm_generation = null;
+        return;
+    } orelse return;
+    defer frame.deinit(allocator);
+    warm_generation = null;
 }
 
 fn highlightingDisabled() bool {
@@ -102,14 +132,11 @@ fn linePreRedraw() zle_hooks.Effects {
         std.mem.eql(u8, current_source.?, desired_snapshot.?.bytes);
     const cleared = if (matches_current) false else clearRegions();
 
-    if (inflight_generation != null and inflight_worker_epoch != async_manager.epoch()) {
+    if (inflight_generation != null and inflight_worker_epoch != highlight_job.epoch()) {
         clearInflight();
     }
     if (inflight_generation != null) return .{ .regions_changed = cleared };
     if (matches_current) return .{ .regions_changed = cleared };
-
-    if (async_manager.activeJob() != null and async_manager.activeJob().? != .highlight and
-        !async_manager.cancelAndRestart()) return .{ .regions_changed = cleared };
 
     var frame = (startDesired(true) catch return .{ .regions_changed = cleared }) orelse
         return .{ .regions_changed = cleared };
@@ -120,6 +147,11 @@ fn linePreRedraw() zle_hooks.Effects {
 
 fn workerCompleted(frame: *const async_manager.protocol.Frame) zle_hooks.Effects {
     if (frame.header.job != .highlight) return .{};
+    if (frame.header.generation == warm_generation) {
+        warm_generation = null;
+        _ = startDesired(false) catch null;
+        return .{};
+    }
     return .{ .regions_changed = installResult(frame) };
 }
 
@@ -127,7 +159,7 @@ fn installResult(frame: *const async_manager.protocol.Frame) bool {
     if (frame.header.message != .response or
         inflight_generation == null or
         frame.header.generation != inflight_generation.? or
-        inflight_worker_epoch != async_manager.epoch()) return false;
+        inflight_worker_epoch != highlight_job.epoch()) return false;
     if (frame.header.status != .ok) {
         std.log.err("highlight worker failed: {s}", .{frame.payload});
         clearInflight();
@@ -179,10 +211,10 @@ fn startDesired(wait: bool) !?async_manager.protocol.Frame {
     generation +%= 1;
     if (generation == 0) generation = 1;
     inflight_generation = generation;
-    inflight_worker_epoch = async_manager.epoch();
+    inflight_worker_epoch = highlight_job.epoch();
     const deadline = async_manager.deadlineAfter(if (wait) foreground_budget_ns else std.time.ns_per_ms);
-    if (wait) return try async_manager.submitAndWait(.highlight, generation, desired.bytes, deadline);
-    try async_manager.submit(.highlight, generation, desired.bytes, deadline);
+    if (wait) return try highlight_job.submitAndWait(generation, desired.bytes, deadline);
+    try highlight_job.submit(generation, desired.bytes, deadline);
     return null;
 }
 

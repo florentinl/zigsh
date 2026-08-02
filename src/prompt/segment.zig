@@ -29,8 +29,3 @@ pub const Output = struct {
 };
 
 pub const Renderer = *const fn (std.mem.Allocator, *const context.Context) anyerror!Output;
-
-pub const Definition = struct {
-    name: Name,
-    render: Renderer,
-};

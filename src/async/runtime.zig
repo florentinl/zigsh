@@ -15,6 +15,9 @@ const c = @cImport({
 });
 
 const allocator = std.heap.c_allocator;
+const terminate_grace_ns = 25 * std.time.ns_per_ms;
+const kill_grace_ns = 100 * std.time.ns_per_ms;
+const reap_poll_us = 1000;
 
 pub const SubmitError = error{
     InvalidPayload,
@@ -34,7 +37,7 @@ pub const ReceiveError = error{
     WorkerClosed,
 };
 
-const StartError = error{
+pub const StartError = error{
     ConfigureFailed,
     ForkFailed,
     ProcessGroupFailed,
@@ -73,8 +76,7 @@ pub const Client = struct {
         }
 
         if (c.setpgid(pid, pid) != 0) {
-            _ = c.kill(pid, c.SIGTERM);
-            reap(pid);
+            terminateAndReap(pid, pid);
             return error.ProcessGroupFailed;
         }
 
@@ -98,8 +100,7 @@ pub const Client = struct {
         }
         if (self.worker_pid > 0) {
             const target = if (self.worker_pgid > 0) -self.worker_pgid else self.worker_pid;
-            _ = c.kill(target, c.SIGTERM);
-            reap(self.worker_pid);
+            terminateAndReap(self.worker_pid, target);
         }
         self.worker_pid = -1;
         self.worker_pgid = -1;
@@ -317,11 +318,33 @@ pub fn monotonicNanoseconds() u64 {
     return @as(u64, @intCast(value.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(value.tv_nsec));
 }
 
-fn reap(pid: c.pid_t) void {
+fn terminateAndReap(pid: c.pid_t, signal_target: c.pid_t) void {
+    _ = c.kill(signal_target, c.SIGTERM);
+    if (waitForExit(pid, terminate_grace_ns)) return;
+
+    _ = c.kill(signal_target, c.SIGKILL);
+    _ = waitForExit(pid, kill_grace_ns);
+}
+
+fn waitForExit(pid: c.pid_t, timeout_ns: u64) bool {
+    const deadline_ns = monotonicNanoseconds() +| timeout_ns;
+    const max_polls = timeout_ns / (reap_poll_us * std.time.ns_per_us) + 1;
     var status: c_int = 0;
-    while (c.waitpid(pid, &status, 0) < 0) {
-        if (std.c._errno().* != c.EINTR) break;
+    for (0..max_polls) |_| {
+        const waited = c.waitpid(pid, &status, c.WNOHANG);
+        if (waited == pid) return true;
+        if (waited < 0) {
+            if (std.c._errno().* == c.EINTR) continue;
+            return std.c._errno().* == c.ECHILD;
+        }
+        if (monotonicNanoseconds() >= deadline_ns) return false;
+        _ = c.usleep(reap_poll_us);
     }
+    return false;
+}
+
+fn reap(pid: c.pid_t) void {
+    _ = waitForExit(pid, kill_grace_ns);
 }
 
 test "per-process worker transports framed jobs" {
@@ -402,6 +425,43 @@ test "stopping a worker terminates every process in its cancellation group" {
         _ = c.usleep(10 * 1000);
     }
     try std.testing.expect(member_reaped);
+}
+
+test "worker termination escalates when SIGTERM cannot terminate the child" {
+    var ready = [2]c_int{ -1, -1 };
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&ready));
+    defer {
+        if (ready[0] >= 0) _ = c.close(ready[0]);
+        if (ready[1] >= 0) _ = c.close(ready[1]);
+    }
+
+    const child = c.fork();
+    try std.testing.expect(child >= 0);
+    if (child == 0) {
+        _ = c.close(ready[0]);
+        if (c.setpgid(0, 0) != 0) c._exit(2);
+        var blocked = std.posix.sigemptyset();
+        std.posix.sigaddset(&blocked, .TERM);
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, null);
+        const byte: u8 = 1;
+        if (c.write(ready[1], &byte, 1) != 1) c._exit(3);
+        while (true) _ = c.pause();
+    }
+
+    _ = c.close(ready[1]);
+    ready[1] = -1;
+    var byte: u8 = 0;
+    try std.testing.expectEqual(@as(isize, 1), c.read(ready[0], &byte, 1));
+
+    const started = monotonicNanoseconds();
+    terminateAndReap(child, -child);
+    const elapsed = monotonicNanoseconds() - started;
+
+    try std.testing.expect(elapsed >= terminate_grace_ns);
+    try std.testing.expect(elapsed < std.time.ns_per_s);
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(c.pid_t, -1), c.waitpid(child, &status, c.WNOHANG));
+    try std.testing.expectEqual(c.ECHILD, std.c._errno().*);
 }
 
 test "worker clients abandon inherited ownership without signalling the parent worker" {
