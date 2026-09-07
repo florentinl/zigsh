@@ -2,10 +2,6 @@ const std = @import("std");
 const zle = @import("zle.zig");
 const zle_hooks = @import("zle_hooks.zig");
 
-const zsh = @cImport({
-    @cInclude("zsh.mdh");
-});
-
 pub const Callback = *const fn () zle_hooks.Effects;
 
 pub const Subscription = struct {
@@ -25,13 +21,13 @@ pub const Subscription = struct {
         if (self.fd >= 0) self.unregister();
         try add(fd, self.callback);
         errdefer remove(fd, self.callback);
-        if (!setFdWatch(fd, true)) return error.WatchFailed;
+        zle.watchFd(fd, widget_name) catch return error.WatchFailed;
         self.fd = fd;
     }
 
     pub fn unregister(self: *Subscription) void {
         if (self.fd < 0) return;
-        _ = setFdWatch(self.fd, false);
+        zle.unwatchFd(self.fd) catch {};
         remove(self.fd, self.callback);
         self.fd = -1;
     }
@@ -58,7 +54,7 @@ pub fn setup() c_int {
 pub fn cleanup() void {
     while (entry_count != 0) {
         const entry = entries[entry_count - 1].?;
-        _ = setFdWatch(entry.fd, false);
+        zle.unwatchFd(entry.fd) catch {};
         entry_count -= 1;
         entries[entry_count] = null;
     }
@@ -118,22 +114,6 @@ fn runCallbacks() zle_hooks.Effects {
         effects.merge(current.callback());
     }
     return effects;
-}
-
-fn setFdWatch(fd: c_int, enable: bool) bool {
-    // Unit tests exercise registry/recovery without an initialized ZLE.
-    if (@import("builtin").is_test) return true;
-    var command_buffer: [96]u8 = undefined;
-    const command = if (enable)
-        std.fmt.bufPrintZ(&command_buffer, "zle -F -w {d} {s}", .{ fd, widget_name }) catch return false
-    else
-        std.fmt.bufPrintZ(&command_buffer, "zle -F {d} 2>/dev/null", .{fd}) catch return false;
-
-    const saved_status = zsh.lastval;
-    zsh.execstring(@constCast(command.ptr), 1, 0, @constCast("zigsh-fd-event"));
-    const succeeded = zsh.lastval == 0;
-    zsh.lastval = saved_status;
-    return succeeded;
 }
 
 var test_order: [2]u8 = undefined;

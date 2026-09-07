@@ -1,3 +1,6 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
 const zsh = @cImport({
     @cInclude("Zle/zle.mdh");
 });
@@ -25,6 +28,43 @@ pub const Widget = struct {
         self.handle = null;
     }
 };
+
+/// Installs or replaces the `zle -F -w FD WIDGET` association without parsing
+/// shell source. `bin_zle` is ZLE's exported builtin handler; it owns the
+/// watch registry and its allocation/lifecycle rules.
+pub fn watchFd(fd: c_int, widget_name: [:0]const u8) FdWatchError!void {
+    try invokeFdBuiltin(fd, widget_name);
+}
+
+/// Removes the `zle -F FD` association without parsing shell source.
+pub fn unwatchFd(fd: c_int) FdWatchError!void {
+    try invokeFdBuiltin(fd, null);
+}
+
+pub const FdWatchError = error{
+    InvalidFileDescriptor,
+    RegistrationFailed,
+    RemovalFailed,
+};
+
+fn invokeFdBuiltin(fd: c_int, widget_name: ?[:0]const u8) FdWatchError!void {
+    if (fd < 0) return error.InvalidFileDescriptor;
+    // Unit tests exercise the subscription registry without loading ZLE.
+    if (builtin.is_test) return;
+
+    var fd_buffer: [32]u8 = undefined;
+    const fd_text = std.fmt.bufPrintZ(&fd_buffer, "{d}", .{fd}) catch unreachable;
+    var arguments = [_][*c]u8{ fd_text.ptr, null, null };
+    var options: zsh.struct_options = std.mem.zeroes(zsh.struct_options);
+    options.ind['F'] = 1;
+    if (widget_name) |name| {
+        arguments[1] = @constCast(name.ptr);
+        options.ind['w'] = 1;
+    }
+
+    const status = zsh.bin_zle(@constCast("zle"), &arguments, &options, 0);
+    if (status != 0) return if (widget_name == null) error.RemovalFailed else error.RegistrationFailed;
+}
 
 /// Refresh ZLE's cached prompt expansion without drawing the screen. The
 /// caller must already be in a path, such as zle-line-pre-redraw, that Zsh
