@@ -7,10 +7,14 @@ zmodload -d zigsh zsh/zle
 zmodload zigsh
 
 [[ $PROMPT == *'╭─'* ]]
-[[ $PROMPT == *' '* ]]
-[[ $PROMPT == *'  zigsh '* ]]
-current_branch=$(git branch --show-current)
-[[ -z $current_branch || $PROMPT == *"$current_branch "* ]]
+case $OSTYPE in
+  darwin*) [[ $PROMPT == *' '* ]] ;;
+  linux*) [[ $PROMPT == *' '* ]] ;;
+esac
+# Noninteractive loading must not wait for Git. The initial directory comes
+# from shell PWD; PTY tests verify the later worker-supplied repository state.
+[[ $PROMPT == *'  '* ]]
+[[ $PROMPT == *zigsh* ]]
 [[ $PROMPT == *$'\n'*'╰─'*'❯'* ]]
 [[ $RPROMPT == *'─╯'* ]]
 prompt_fill=${PROMPT#*}

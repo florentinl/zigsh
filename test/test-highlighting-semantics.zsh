@@ -9,7 +9,7 @@ trap 'zpty -d semantic_shell 2>/dev/null || true; rm -rf -- "$test_home"' EXIT
 
 mkdir -p -- "$test_home/bin" "$test_home/functions" "$test_home/auto-dir" "$test_home/cd-root/cd-dir"
 print -r -- '#!/bin/sh' >| "$test_home/bin/external-command"
-chmod +x -- "$test_home/bin/external-command"
+chmod +x "$test_home/bin/external-command"
 print -r -- '#!/bin/sh' >| "$test_home/non-executable"
 touch -- "$test_home/existing-file"
 touch -- "$test_home/-output"
@@ -34,7 +34,7 @@ setup_commands=(
   'function dead-function { : }; disable -f dead-function'
   'hash hashed-command=$ZIGSH_TEST_HOME/bin/external-command; hash -d work=$ZIGSH_TEST_HOME'
   'disable setopt; disable -r repeat'
-  'function zigsh-dump-semantic-highlights { print -rl -- $region_highlight >| $ZIGSH_HIGHLIGHT_DUMP; (( dump_count += 1 )); BUFFER="print ZIGSH_SEMANTIC_DUMPED_$dump_count"; zle accept-line; }'
+  'function zigsh-dump-semantic-highlights { (( ${#region_highlight} )) || return 0; print -rl -- $region_highlight >| $ZIGSH_HIGHLIGHT_DUMP; (( dump_count += 1 )); BUFFER="print ZIGSH_SEMANTIC_DUMPED_$dump_count"; zle accept-line; }'
   "typeset -gi dump_count=0; zle -N zigsh-dump-semantic-highlights; bindkey '^G' zigsh-dump-semantic-highlights"
   "module_path=(${0:A:h:h}/zig-out/lib \$module_path); zmodload -d zigsh zsh/zle; zmodload zigsh"
   'print ZIGSH_SEMANTIC_READY'
@@ -57,22 +57,6 @@ function wait_for_output {
   return 1
 }
 
-function wait_for_redraw {
-  local chunk
-  local -i idle_polls=0
-  local -i received_output=0
-  repeat 300; do
-    if zpty -rt semantic_shell chunk; then
-      idle_polls=0
-      received_output=1
-    elif (( received_output && ++idle_polls == 20 )); then
-      return 0
-    fi
-    sleep 0.01
-  done
-  return 1
-}
-
 typeset -gi setup_index=0
 for command in $setup_commands; do
   (( setup_index += 1 ))
@@ -88,9 +72,21 @@ function dump_buffer {
   local buffer=$1
   (( expected_dump += 1 ))
   zpty -wn semantic_shell "${buffer}"
-  wait_for_redraw
-  zpty -wn semantic_shell $'\C-G'
-  if ! wait_for_output "*ZIGSH_SEMANTIC_DUMPED_${expected_dump}*"; then
+  local marker="ZIGSH_SEMANTIC_DUMPED_${expected_dump}" chunk
+  output=
+  local -i attempt=0
+  while (( attempt < 100 )); do
+    zpty -wn semantic_shell $'\C-G'
+    repeat 20; do
+      if zpty -rt semantic_shell chunk; then
+        output+=$chunk
+        [[ $output == *$marker* ]] && break 2
+      fi
+      sleep 0.01
+    done
+    (( attempt += 1 ))
+  done
+  if [[ $output != *$marker* ]]; then
     print -u2 -r -- "timed out waiting for semantic dump $expected_dump: $buffer"
     print -u2 -r -- "$output"
     return 1

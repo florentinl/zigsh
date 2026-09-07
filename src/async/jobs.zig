@@ -4,6 +4,7 @@ const protocol = @import("protocol.zig");
 const clock = @import("../prompt/clock.zig");
 const git = @import("../prompt/git.zig");
 const git_wire = @import("../prompt/git_wire.zig");
+const kubernetes = @import("../prompt/kubernetes.zig");
 const alias_expansion = @import("../highlight/alias_expansion.zig");
 const highlight_engine = @import("../highlight/engine.zig");
 const highlight_wire = @import("../highlight/wire.zig");
@@ -30,7 +31,8 @@ pub const State = struct {
         return switch (job) {
             .ping => allocator.dupe(u8, payload),
             .prompt_git => inspectGit(allocator, payload),
-            .highlight => if (builtin.is_test)
+            .prompt_kubernetes => if (builtin.is_test) error.UnsupportedJob else kubernetes.inspect(allocator),
+            .line_analysis => if (builtin.is_test)
                 error.UnsupportedJob
             else
                 self.highlightSource(allocator, payload),
@@ -52,12 +54,20 @@ pub const State = struct {
         );
         defer semantic_analysis.deinit(allocator);
 
-        const expanded = if (semantic_analysis.expansion_candidates.len == 0)
+        var expanded = if (semantic_analysis.expansion_candidates.len == 0)
             null
         else
-            try self.aliases.?.highlight(source, &state);
-        defer if (expanded) |owned| allocator.free(owned);
-        const expanded_count = if (expanded) |owned| owned.len else 0;
+            try self.aliases.?.analyze(source, &state);
+        defer if (expanded) |*owned| owned.deinit(allocator);
+        const direct_commands = if (expanded == null)
+            try semantic.copyCommandWords(allocator, source, semantic_analysis.commands)
+        else
+            null;
+        defer if (direct_commands) |owned| {
+            for (owned) |command| allocator.free(command);
+            allocator.free(owned);
+        };
+        const expanded_count = if (expanded) |owned| owned.spans.len else 0;
 
         const candidates = try allocator.alloc(
             spans.Span,
@@ -68,11 +78,12 @@ pub const State = struct {
         const semantic_end = syntax_end + semantic_analysis.spans.len;
         @memcpy(candidates[0..syntax_end], syntax.spans);
         @memcpy(candidates[syntax_end..semantic_end], semantic_analysis.spans);
-        if (expanded) |owned| @memcpy(candidates[semantic_end..], owned);
+        if (expanded) |owned| @memcpy(candidates[semantic_end..], owned.spans);
 
         const composed = try spans.compose(allocator, @intCast(source.len), candidates);
         defer allocator.free(composed);
-        return highlight_wire.encode(allocator, composed);
+        const commands: []const []const u8 = if (expanded) |owned| owned.commands else direct_commands.?;
+        return highlight_wire.encode(allocator, composed, commands, protocol.max_payload_length);
     }
 };
 

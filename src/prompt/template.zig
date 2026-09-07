@@ -6,7 +6,7 @@ const style = @import("style.zig");
 const max_depth = 8;
 
 comptime {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(50_000);
     validate(config.top_template);
     validate(config.bottom_template);
     validate(config.right_template);
@@ -158,6 +158,11 @@ fn appendStyle(output: *std.ArrayList(u8), allocator: std.mem.Allocator, name: s
         .git_status => config.styles.git_status,
         .success => config.styles.success,
         .@"error" => config.styles.@"error",
+        .python_cap_left => config.styles.python_cap_left,
+        .python => config.styles.python,
+        .python_cap_right => config.styles.python_cap_right,
+        .kubernetes => config.styles.kubernetes,
+        .aws => config.styles.aws,
         .sudo => config.styles.sudo,
         .character => config.styles.character,
         .character_error => config.styles.character_error,

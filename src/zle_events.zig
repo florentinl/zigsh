@@ -99,11 +99,30 @@ fn dispatch(_: [*c][*c]u8) callconv(.c) c_int {
 
 fn runCallbacks() zle_hooks.Effects {
     var effects: zle_hooks.Effects = .{};
-    for (entries[0..entry_count]) |entry| effects.merge(entry.?.callback());
+    // Recovery can remove/re-register subscriptions during a callback. Iterate
+    // a snapshot and call shared dispatchers only once per readiness event.
+    const snapshot = entries;
+    const count = entry_count;
+    var called: [entry_capacity]Callback = undefined;
+    var called_count: usize = 0;
+    for (snapshot[0..count]) |entry| {
+        const current = entry.?;
+        if (indexOf(current.fd, current.callback) == null) continue;
+        var already_called = false;
+        for (called[0..called_count]) |callback| {
+            if (callback == current.callback) already_called = true;
+        }
+        if (already_called) continue;
+        called[called_count] = current.callback;
+        called_count += 1;
+        effects.merge(current.callback());
+    }
     return effects;
 }
 
 fn setFdWatch(fd: c_int, enable: bool) bool {
+    // Unit tests exercise registry/recovery without an initialized ZLE.
+    if (@import("builtin").is_test) return true;
     var command_buffer: [96]u8 = undefined;
     const command = if (enable)
         std.fmt.bufPrintZ(&command_buffer, "zle -F -w {d} {s}", .{ fd, widget_name }) catch return false
@@ -148,4 +167,40 @@ test "fd sources share ordered dispatch and merged effects" {
     try std.testing.expect(effects.prompt_changed);
     try std.testing.expect(effects.regions_changed);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, test_order[0..test_count]);
+}
+
+fn removingTestCallback() zle_hooks.Effects {
+    test_count += 1;
+    remove(10, removingTestCallback);
+    remove(11, secondTestCallback);
+    return .{};
+}
+
+test "fd dispatcher tolerates removal of subscriptions during callbacks" {
+    entries = @splat(null);
+    entry_count = 0;
+    test_count = 0;
+    defer {
+        entries = @splat(null);
+        entry_count = 0;
+    }
+    try add(10, removingTestCallback);
+    try add(11, secondTestCallback);
+    _ = runCallbacks();
+    try std.testing.expectEqual(@as(usize, 1), test_count);
+    try std.testing.expectEqual(@as(usize, 0), entry_count);
+}
+
+test "fd dispatcher invokes a shared callback once per event" {
+    entries = @splat(null);
+    entry_count = 0;
+    test_count = 0;
+    defer {
+        entries = @splat(null);
+        entry_count = 0;
+    }
+    try add(10, firstTestCallback);
+    try add(11, firstTestCallback);
+    _ = runCallbacks();
+    try std.testing.expectEqual(@as(usize, 1), test_count);
 }

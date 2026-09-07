@@ -10,6 +10,18 @@ pub const max_expansion_depth = 16;
 pub const max_expansion_count = 128;
 pub const max_virtual_source_bytes = 256 * 1024;
 
+pub const Result = struct {
+    spans: []Span,
+    commands: [][]u8,
+
+    pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        allocator.free(self.spans);
+        for (self.commands) |command| allocator.free(command);
+        allocator.free(self.commands);
+        self.* = undefined;
+    }
+};
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     parser: *tree_sitter.Parser,
@@ -34,6 +46,15 @@ pub const Engine = struct {
     }
 
     pub fn highlight(self: *Engine, source: []const u8, state: anytype) ![]Span {
+        var result = try self.analyze(source, state);
+        for (result.commands) |command| self.allocator.free(command);
+        self.allocator.free(result.commands);
+        const projected = result.spans;
+        result.spans = &.{};
+        return projected;
+    }
+
+    pub fn analyze(self: *Engine, source: []const u8, state: anytype) !Result {
         var virtual = try VirtualSource.init(self.allocator, source);
         defer virtual.deinit(self.allocator);
 
@@ -58,11 +79,10 @@ pub const Engine = struct {
             defer analysis.deinit(self.allocator);
 
             if (expansion_count == max_expansion_count) {
-                return project(
+                return self.finishAnalysis(
                     self.allocator,
-                    analysis.spans,
-                    virtual.origins,
-                    virtual.lineages,
+                    virtual,
+                    &analysis,
                     lineages.items,
                     unsafe_aliases.items,
                 );
@@ -80,11 +100,10 @@ pub const Engine = struct {
             defer replacements.deinit(self.allocator);
 
             if (replacements.len() == 0) {
-                return project(
+                return self.finishAnalysis(
                     self.allocator,
-                    analysis.spans,
-                    virtual.origins,
-                    virtual.lineages,
+                    virtual,
+                    &analysis,
                     lineages.items,
                     unsafe_aliases.items,
                 );
@@ -95,6 +114,28 @@ pub const Engine = struct {
             virtual = next;
             expansion_count += replacements.len();
         }
+    }
+
+    fn finishAnalysis(
+        self: *Engine,
+        allocator: std.mem.Allocator,
+        virtual: VirtualSource,
+        analysis: *const semantic.Analysis,
+        lineages: []const Lineage,
+        unsafe_aliases: []const Span,
+    ) !Result {
+        _ = self;
+        const projected = try project(
+            allocator,
+            analysis.spans,
+            virtual.origins,
+            virtual.lineages,
+            lineages,
+            unsafe_aliases,
+        );
+        errdefer allocator.free(projected);
+        const commands = try semantic.copyCommandWords(allocator, virtual.bytes, analysis.commands);
+        return .{ .spans = projected, .commands = commands };
     }
 
     fn collectReplacements(

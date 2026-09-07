@@ -8,18 +8,18 @@ dump_file="$test_home/regions"
 buffer_file="$test_home/buffer"
 trap 'zpty -d highlight_shell 2>/dev/null || true; rm -rf -- "$test_home"' EXIT
 
-wait-for-redraw() {
-  local chunk
-  local -i idle_polls=0
-  local -i received_output=0
-  repeat 200; do
-    if zpty -rt highlight_shell chunk; then
-      idle_polls=0
-      received_output=1
-    elif (( received_output && ++idle_polls == 50 )); then
-      return 0
-    fi
-    sleep 0.01
+dump-when-ready() {
+  local marker=$1 chunk
+  local output=
+  repeat 100; do
+    zpty -wn highlight_shell $'\C-G'
+    repeat 20; do
+      if zpty -rt highlight_shell chunk; then
+        output+=$chunk
+        [[ $output == *$marker* ]] && return 0
+      fi
+      sleep 0.01
+    done
   done
   return 1
 }
@@ -34,6 +34,7 @@ zpty -b highlight_shell env \
 zpty -w highlight_shell \
   "module_path=(${0:A:h:h}/zig-out/lib \$module_path); zmodload -d zigsh zsh/zle; zmodload zigsh
 function zigsh-dump-highlights {
+  (( \${#region_highlight} )) || return 0
   print -rl -- \$region_highlight >| \$ZIGSH_HIGHLIGHT_DUMP
   print -rn -- \$BUFFER >| \$ZIGSH_BUFFER_DUMP
   (( dump_count += 1 ))
@@ -47,9 +48,7 @@ print ZIGSH_HIGHLIGHT_READY"
 zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHT_READY*'
 
 zpty -wn highlight_shell $'if true; then echo "é🙂 $USER"; fi # note'
-wait-for-redraw
-zpty -wn highlight_shell $'\C-G'
-zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_1*'
+dump-when-ready ZIGSH_HIGHLIGHTS_DUMPED_1
 
 regions=("${(@f)$(<"$dump_file")}")
 joined_regions="${(F)regions}"
@@ -68,9 +67,7 @@ for iteration in {1..20}; do
 done
 
 zpty -wn highlight_shell $'for item in one two; do print "$item"; done'
-wait-for-redraw
-zpty -wn highlight_shell $'\C-G'
-zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_2*'
+dump-when-ready ZIGSH_HIGHLIGHTS_DUMPED_2
 
 regions=("${(@f)$(<"$dump_file")}")
 joined_regions="${(F)regions}"
@@ -80,7 +77,5 @@ joined_regions="${(F)regions}"
 
 zpty -wn highlight_shell $'\e[200~echo one\necho two\e[201~'
 zpty -wn highlight_shell $'\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f'
-wait-for-redraw
-zpty -wn highlight_shell $'\C-G'
-zpty -r -m highlight_shell output '*ZIGSH_HIGHLIGHTS_DUMPED_3*'
+dump-when-ready ZIGSH_HIGHLIGHTS_DUMPED_3
 [[ "$(<"$buffer_file")" == 'echo one' ]]

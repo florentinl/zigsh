@@ -163,23 +163,23 @@ pub export fn setup_(_: zsh.Module) callconv(.c) c_int {
         return async_result;
     }
 
-    const prompt_result = prompt.setup();
-    if (prompt_result != 0) {
-        async_manager.cleanup();
-        zle_events.cleanup();
-        zle_hooks.cleanup();
-        history.cleanup();
-        return prompt_result;
-    }
-
     const highlight_result = highlight.setup();
     if (highlight_result != 0) {
-        prompt.cleanup();
         async_manager.cleanup();
         zle_events.cleanup();
         zle_hooks.cleanup();
         history.cleanup();
         return highlight_result;
+    }
+
+    const prompt_result = prompt.setup();
+    if (prompt_result != 0) {
+        highlight.cleanup();
+        async_manager.cleanup();
+        zle_events.cleanup();
+        zle_hooks.cleanup();
+        history.cleanup();
+        return prompt_result;
     }
     return 0;
 }
@@ -198,8 +198,8 @@ pub export fn boot_(_: zsh.Module) callconv(.c) c_int {
 }
 
 pub export fn cleanup_(module: zsh.Module) callconv(.c) c_int {
-    highlight.cleanup();
     prompt.cleanup();
+    highlight.cleanup();
     async_manager.cleanup();
     zle_events.cleanup();
     zle_hooks.cleanup();

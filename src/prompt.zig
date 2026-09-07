@@ -1,5 +1,6 @@
 const std = @import("std");
 const async_manager = @import("async/manager.zig");
+const line_analysis = @import("highlight/mod.zig");
 
 const zsh = @cImport({
     @cInclude("zsh.mdh");
@@ -12,6 +13,7 @@ pub const metrics = @import("prompt/metrics.zig");
 const segment = @import("prompt/segment.zig");
 const template = @import("prompt/template.zig");
 const character = @import("prompt/segments/character.zig");
+const aws = @import("prompt/segments/aws.zig");
 const directory = @import("prompt/segments/directory.zig");
 const git_branch = @import("prompt/segments/git_branch.zig");
 const git_commit = @import("prompt/segments/git_commit.zig");
@@ -21,6 +23,9 @@ const git_status = @import("prompt/segments/git_status.zig");
 const git = @import("prompt/git.zig");
 const git_wire = @import("prompt/git_wire.zig");
 const os = @import("prompt/segments/os.zig");
+const python = @import("prompt/segments/python.zig");
+const kubernetes = @import("prompt/segments/kubernetes.zig");
+const kubernetes_provider = @import("prompt/kubernetes.zig");
 const resize = @import("prompt/resize.zig");
 const status = @import("prompt/segments/status.zig");
 const sudo = @import("prompt/segments/sudo.zig");
@@ -29,7 +34,8 @@ const zle_hooks = @import("zle_hooks.zig");
 const allocator = std.heap.c_allocator;
 const Context = context.Context;
 const segment_count = @typeInfo(segment.Name).@"enum".fields.len;
-const foreground_git_budget_ns = 8 * std.time.ns_per_ms;
+// Submission is nonblocking. These deadlines are not foreground wait budgets.
+const submission_deadline_ns = std.time.ns_per_ms;
 
 const renderers = std.EnumArray(segment.Name, segment.Renderer).init(.{
     .os = os.render,
@@ -40,8 +46,27 @@ const renderers = std.EnumArray(segment.Name, segment.Renderer).init(.{
     .git_state = git_state.render,
     .git_status = git_status.render,
     .status = status.render,
+    .python = python.render,
+    .kubernetes = kubernetes.render,
+    .aws = aws.render,
     .sudo = sudo.render,
     .character = character.render,
+});
+
+const visibility = std.EnumArray(segment.Name, segment.Visibility).init(.{
+    .os = .always,
+    .directory = .always,
+    .git_provider = .always,
+    .git_branch = .always,
+    .git_commit = .always,
+    .git_state = .always,
+    .git_status = .always,
+    .status = .always,
+    .python = .always,
+    .kubernetes = .{ .commands = kubernetes.matchesCommand },
+    .aws = .{ .commands = aws.matchesCommand },
+    .sudo = .always,
+    .character = .always,
 });
 
 var preprompt_registered = false;
@@ -49,7 +74,15 @@ var last_columns: usize = 0;
 var last_prompt: ?[]u8 = null;
 var last_rprompt: ?[]u8 = null;
 var redraw_subscription = zle_hooks.Subscription.init(redrawBeforeZle);
+var analysis_subscription = line_analysis.AnalysisSubscription.init(lineAnalysisUpdated);
 var git_job = async_manager.Job.init(.prompt_git, workerCompleted);
+var kubernetes_job = async_manager.Job.init(.prompt_kubernetes, kubernetesCompleted);
+var kubernetes_generation: u64 = 0;
+var pending_kubernetes_generation: ?u64 = null;
+var pending_kubernetes_epoch: u64 = 0;
+var kubernetes_requested = false;
+var kubernetes_text: ?[]u8 = null;
+var last_visibility: [segment_count]bool = @splat(false);
 var git_generation: u64 = 0;
 var pending_git_generation: ?u64 = null;
 var pending_git_cwd: ?[]u8 = null;
@@ -76,6 +109,15 @@ pub fn setup() c_int {
     if (preprompt_registered) return 0;
 
     git_job.register() catch return 1;
+    kubernetes_job.register() catch {
+        git_job.unregister();
+        return 1;
+    };
+    analysis_subscription.register() catch {
+        kubernetes_job.unregister();
+        git_job.unregister();
+        return 1;
+    };
     zsh.opts[zsh.PROMPTSUBST] = 0;
     zsh.rprompt_indent = 0;
     renderPrompt();
@@ -96,6 +138,11 @@ pub fn setup() c_int {
 pub fn cleanup() void {
     resize.cleanup();
     git_job.unregister();
+    kubernetes_job.unregister();
+    clearKubernetes();
+    kubernetes_requested = false;
+    last_visibility = @splat(false);
+    analysis_subscription.unregister();
     redraw_subscription.unregister();
     if (preprompt_registered) {
         zsh.delprepromptfn(renderPrompt);
@@ -117,6 +164,22 @@ fn redrawAfterResize() bool {
 
 fn redrawBeforeZle() zle_hooks.Effects {
     return if (updatePromptForColumnChange()) .{ .prompt_changed = true } else .{};
+}
+
+fn lineAnalysisUpdated() zle_hooks.Effects {
+    // Most edits change a command word, not segment visibility. Avoid rebuilding
+    // the whole prompt for every letter of an unrelated command.
+    const next = currentVisibility();
+    if (std.mem.eql(bool, &last_visibility, &next)) return .{};
+    return if (updatePrompt(.async_completion)) .{ .prompt_changed = true } else .{};
+}
+
+fn currentVisibility() [segment_count]bool {
+    var result: [segment_count]bool = undefined;
+    inline for (std.enums.values(segment.Name)) |name| {
+        result[@intFromEnum(name)] = visibility.get(name).visible(line_analysis.currentCommands());
+    }
+    return result;
 }
 
 fn updatePromptForColumnChange() bool {
@@ -141,12 +204,15 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
     defer current.deinit();
     snapshot.phases.context_ns = clock.elapsedSince(context_started);
     if (trigger == .preprompt) {
-        const wait_started = clock.nowNanoseconds();
         refreshGit(current.cwd);
-        last_sync_wait_ns = clock.elapsedSince(wait_started);
+        refreshKubernetes();
+        last_sync_wait_ns = 0;
     }
+    const next_visibility = currentVisibility();
+    if (next_visibility[@intFromEnum(segment.Name.kubernetes)]) requestKubernetes();
     const cache_started = clock.nowNanoseconds();
     attachCachedGit(&current) catch return false;
+    current.kubernetes_text = kubernetes_text;
     snapshot.phases.cache_ns = clock.elapsedSince(cache_started);
 
     var values: [segment_count]segment.Output = [_]segment.Output{.{}} ** segment_count;
@@ -154,7 +220,9 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
     const segments_started = clock.nowNanoseconds();
     inline for (std.enums.values(segment.Name)) |name| {
         const segment_started = clock.nowNanoseconds();
-        values[@intFromEnum(name)] = renderers.get(name)(allocator, &current) catch return false;
+        if (next_visibility[@intFromEnum(name)]) {
+            values[@intFromEnum(name)] = renderers.get(name)(allocator, &current) catch return false;
+        }
         const rendered_text: ?[]const u8 = if (values[@intFromEnum(name)].text) |text|
             text
         else if (name == .git_status and current.git != null)
@@ -197,6 +265,7 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
     const rprompt_changed = assignPromptIfChanged("RPROMPT", rprompt.items, &last_rprompt) catch return false;
     snapshot.phases.assignment_ns = clock.elapsedSince(assignment_started);
     last_columns = columns;
+    last_visibility = next_visibility;
     snapshot.prompt_changed = prompt_changed or rprompt_changed;
     snapshot.phases.render_total_ns = clock.elapsedSince(render_started);
     if (trigger == .preprompt) last_initial_total_ns = snapshot.phases.render_total_ns;
@@ -210,14 +279,8 @@ fn updatePrompt(trigger: metrics.Trigger) bool {
 }
 
 fn refreshGit(cwd: []const u8) void {
-    if (pending_git_generation != null and pending_git_worker_epoch != git_job.epoch()) {
-        clearPendingGit();
-    }
-    if (pending_git_cwd) |pending_cwd| {
-        if (std.mem.eql(u8, pending_cwd, cwd) and git_job.busy()) return;
-    }
-    // Besides cancellation, this fork refreshes the worker's snapshot of Zsh
-    // options, aliases, functions, and commands after the previous command.
+    // Always refresh after a command, even if an earlier inspection of this
+    // directory is still running. Cancellation/reaping must not wait in ZLE.
     if (!git_job.cancelAndRestart()) {
         clearPendingGit();
         return;
@@ -229,17 +292,11 @@ fn refreshGit(cwd: []const u8) void {
     pending_git_cwd = allocator.dupe(u8, cwd) catch return;
     pending_git_generation = git_generation;
     pending_git_started_ns = clock.nowNanoseconds();
-    pending_git_worker_epoch = git_job.epoch();
-
-    const deadline = async_manager.deadlineAfter(foreground_git_budget_ns);
-    var frame = git_job.submitAndWait(git_generation, cwd, deadline) catch {
+    git_job.submit(git_generation, cwd, async_manager.deadlineAfter(submission_deadline_ns)) catch {
         clearPendingGit();
         return;
-    } orelse return;
-    defer frame.deinit(allocator);
-    _ = installGitResult(&frame) catch {
-        clearPendingGit();
     };
+    pending_git_worker_epoch = git_job.epoch();
 }
 
 fn workerCompleted(frame: *const async_manager.protocol.Frame) zle_hooks.Effects {
@@ -255,7 +312,8 @@ fn workerCompleted(frame: *const async_manager.protocol.Frame) zle_hooks.Effects
 fn installGitResult(frame: *const async_manager.protocol.Frame) !bool {
     if (frame.header.message != .response or
         pending_git_generation == null or
-        frame.header.generation != pending_git_generation.?) return false;
+        frame.header.generation != pending_git_generation.? or
+        pending_git_worker_epoch != git_job.epoch()) return false;
     if (frame.header.status != .ok) {
         clearPendingGit();
         return false;
@@ -297,6 +355,47 @@ fn clearPendingGit() void {
     pending_git_generation = null;
     pending_git_started_ns = 0;
     pending_git_worker_epoch = 0;
+}
+
+fn clearKubernetes() void {
+    if (kubernetes_text) |text| allocator.free(text);
+    kubernetes_text = null;
+    pending_kubernetes_generation = null;
+}
+
+fn refreshKubernetes() void {
+    clearKubernetes();
+    kubernetes_requested = false;
+    // Refresh the fork's cwd and shell parameters, but defer config I/O until
+    // a relevant command is typed. Results are cached for this prompt only.
+    if (!kubernetes_job.cancelAndRestart()) kubernetes_requested = true;
+}
+
+fn requestKubernetes() void {
+    if (kubernetes_requested) return;
+    kubernetes_requested = true;
+    kubernetes_generation +%= 1;
+    if (kubernetes_generation == 0) kubernetes_generation = 1;
+    pending_kubernetes_generation = kubernetes_generation;
+    kubernetes_job.submit(kubernetes_generation, &.{}, async_manager.deadlineAfter(submission_deadline_ns)) catch {
+        pending_kubernetes_generation = null;
+        return;
+    };
+    pending_kubernetes_epoch = kubernetes_job.epoch();
+}
+
+fn kubernetesCompleted(frame: *const async_manager.protocol.Frame) zle_hooks.Effects {
+    if (frame.header.message != .response or pending_kubernetes_generation == null or
+        frame.header.generation != pending_kubernetes_generation.? or
+        pending_kubernetes_epoch != kubernetes_job.epoch()) return .{};
+    clearKubernetes();
+    if (frame.header.status == .ok and frame.payload.len != 0 and
+        frame.payload.len <= kubernetes_provider.max_text_bytes and
+        std.unicode.utf8ValidateSlice(frame.payload) and std.mem.indexOfScalar(u8, frame.payload, 0) == null)
+    {
+        kubernetes_text = allocator.dupe(u8, frame.payload) catch null;
+    }
+    return if (updatePrompt(.async_completion)) .{ .prompt_changed = true } else .{};
 }
 
 fn fitToWidth(values: *[segment_count]segment.Output, columns: usize) void {

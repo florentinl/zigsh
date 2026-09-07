@@ -11,6 +11,9 @@ pub const Name = enum {
     git_state,
     git_status,
     status,
+    python,
+    kubernetes,
+    aws,
     sudo,
     character,
 };
@@ -29,3 +32,27 @@ pub const Output = struct {
 };
 
 pub const Renderer = *const fn (std.mem.Allocator, *const context.Context) anyerror!Output;
+
+pub const CommandMatcher = *const fn ([]const u8) bool;
+
+pub fn matchesCommandBasename(command: []const u8, names: []const []const u8) bool {
+    const basename = std.fs.path.basename(command);
+    for (names) |name| {
+        if (std.mem.eql(u8, basename, name)) return true;
+    }
+    return false;
+}
+
+pub const Visibility = union(enum) {
+    always,
+    commands: CommandMatcher,
+
+    pub fn visible(self: Visibility, command_words: []const []const u8) bool {
+        return switch (self) {
+            .always => true,
+            .commands => |matches| for (command_words) |command| {
+                if (matches(command)) break true;
+            } else false,
+        };
+    }
+};

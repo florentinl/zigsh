@@ -29,16 +29,54 @@ pub const ExpansionCandidate = struct {
     kind: ExpansionKind,
 };
 
+pub const Command = struct {
+    start_byte: u32,
+    end_byte: u32,
+
+    pub fn text(self: Command, source: []const u8) ?[]const u8 {
+        if (self.start_byte > self.end_byte or self.end_byte > source.len) return null;
+        return literalCommandWord(source[self.start_byte..self.end_byte]);
+    }
+};
+
 pub const Analysis = struct {
     spans: []Span,
     expansion_candidates: []ExpansionCandidate,
+    commands: []Command,
 
     pub fn deinit(self: *Analysis, allocator: std.mem.Allocator) void {
         allocator.free(self.spans);
         allocator.free(self.expansion_candidates);
+        allocator.free(self.commands);
         self.* = undefined;
     }
 };
+
+pub fn copyCommandWords(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    commands: []const Command,
+) ![][]u8 {
+    var words = std.ArrayList([]u8).empty;
+    errdefer {
+        for (words.items) |word| allocator.free(word);
+        words.deinit(allocator);
+    }
+    // Keys borrow from source for this call only; output strings remain owned.
+    // Keep first-occurrence order without quadratic scans on large pastes.
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    for (commands) |command| {
+        const word = command.text(source) orelse continue;
+        const entry = try seen.getOrPut(word);
+        if (!entry.found_existing) {
+            const owned = try allocator.dupe(u8, word);
+            errdefer allocator.free(owned);
+            try words.append(allocator, owned);
+        }
+    }
+    return words.toOwnedSlice(allocator);
+}
 
 const Token = struct {
     node: ?tree_sitter.Node = null,
@@ -58,6 +96,7 @@ pub fn highlight(
 ) ![]Span {
     const analysis = try analyze(allocator, source, root, state);
     defer allocator.free(analysis.expansion_candidates);
+    defer allocator.free(analysis.commands);
     return analysis.spans;
 }
 
@@ -74,11 +113,14 @@ pub fn analyze(
     };
     errdefer scanner.spans.deinit(allocator);
     errdefer scanner.expansion_candidates.deinit(allocator);
+    errdefer scanner.commands.deinit(allocator);
     try scanner.visit(root);
     const spans = try scanner.spans.toOwnedSlice(allocator);
     errdefer allocator.free(spans);
     const expansion_candidates = try scanner.expansion_candidates.toOwnedSlice(allocator);
-    return .{ .spans = spans, .expansion_candidates = expansion_candidates };
+    errdefer allocator.free(expansion_candidates);
+    const commands = try scanner.commands.toOwnedSlice(allocator);
+    return .{ .spans = spans, .expansion_candidates = expansion_candidates, .commands = commands };
 }
 
 fn Scanner(comptime State: type) type {
@@ -88,6 +130,7 @@ fn Scanner(comptime State: type) type {
         state: State,
         spans: std.ArrayList(Span) = .empty,
         expansion_candidates: std.ArrayList(ExpansionCandidate) = .empty,
+        commands: std.ArrayList(Command) = .empty,
 
         const Self = @This();
 
@@ -144,6 +187,7 @@ fn Scanner(comptime State: type) type {
                 command_index = definition.followingCommand(arguments.items, self.source);
             } else {
                 try self.scanCommandToken(name, true);
+                try self.addCommand(name);
                 if (self.state.aliasKind(name.text(self.source), true) == .regular and
                     self.state.regularAliasExpandsNext(name.text(self.source)))
                 {
@@ -160,6 +204,7 @@ fn Scanner(comptime State: type) type {
                     command_index = index + 1 + relative;
                 } else {
                     try self.scanCommandToken(command, false);
+                    try self.addCommand(command);
                     break;
                 }
             }
@@ -326,6 +371,7 @@ fn Scanner(comptime State: type) type {
                 if (isLiteralWord(command.text(self.source))) {
                     if (self.state.commandKind(command.text(self.source)) != .unknown) {
                         try self.add(command, .recovered_command);
+                        try self.addCommand(command);
                     }
                 }
 
@@ -361,6 +407,7 @@ fn Scanner(comptime State: type) type {
                     self.state.commandKind(command.text(self.source)) != .unknown)
                 {
                     try self.add(command, .recovered_command);
+                    try self.addCommand(command);
                 }
             }
         }
@@ -434,6 +481,7 @@ fn Scanner(comptime State: type) type {
                 self.state.commandKind(command.text(self.source)) != .unknown)
             {
                 try self.add(command, .recovered_command);
+                try self.addCommand(command);
             }
         }
 
@@ -487,6 +535,14 @@ fn Scanner(comptime State: type) type {
                 .start_byte = token.start_byte,
                 .end_byte = token.end_byte,
                 .kind = .safe_scalar_parameter,
+            });
+        }
+
+        fn addCommand(self: *Self, token: Token) !void {
+            if (literalCommandWord(token.text(self.source)) == null) return;
+            try self.commands.append(self.allocator, .{
+                .start_byte = token.start_byte,
+                .end_byte = token.end_byte,
             });
         }
     };

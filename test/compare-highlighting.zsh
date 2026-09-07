@@ -15,7 +15,7 @@ trap 'zpty -d zigsh_shell 2>/dev/null || true; rm -rf -- "$test_home"' EXIT
 zmodload zsh/zpty
 mkdir -p -- "$test_home/bin" "$test_home/functions" "$test_home/auto-dir" "$test_home/cd-root/cd-dir"
 print -r -- '#!/bin/sh' >| "$test_home/bin/external-command"
-chmod +x -- "$test_home/bin/external-command"
+chmod +x "$test_home/bin/external-command"
 touch -- "$test_home/existing-file" "$test_home/-output"
 print -r -- 'available-function() { :; }' >| "$test_home/functions/available-function"
 

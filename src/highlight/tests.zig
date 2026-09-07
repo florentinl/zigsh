@@ -152,6 +152,68 @@ test "semantic analysis exposes expansion intent independently from styles" {
     try std.testing.expect(analysis.expansion_candidates[1].kind == .safe_scalar_parameter);
 }
 
+test "semantic analysis exposes only shell command positions" {
+    const source = "python myscript.py; echo python; echo quoted | python3; echo $(python2 task.py)";
+    var engine = try Engine.init(std.testing.allocator);
+    defer engine.deinit();
+    var syntax = try engine.highlight(source);
+    defer syntax.deinit(std.testing.allocator);
+
+    const state = FakeSemanticState{};
+    var analysis = try semantic.analyze(std.testing.allocator, source, try engine.rootNode(), &state);
+    defer analysis.deinit(std.testing.allocator);
+
+    const expected = [_][]const u8{ "python", "echo", "echo", "python3", "echo", "python2" };
+    try std.testing.expectEqual(expected.len, analysis.commands.len);
+    for (analysis.commands, expected) |command, expected_text| {
+        try std.testing.expectEqualStrings(expected_text, command.text(source).?);
+    }
+}
+
+test "command words deduplicate in first-occurrence order at paste scale" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    var commands: std.ArrayList(semantic.Command) = .empty;
+    defer commands.deinit(allocator);
+    for (0..20_000) |index| {
+        var buffer: [32]u8 = undefined;
+        const word = try std.fmt.bufPrint(&buffer, "command{d}", .{index});
+        const start = source.items.len;
+        try source.appendSlice(allocator, word);
+        try commands.append(allocator, .{ .start_byte = @intCast(start), .end_byte = @intCast(source.items.len) });
+        try source.append(allocator, ';');
+    }
+    for (0..10) |index| try commands.append(allocator, commands.items[index]);
+    const words = try semantic.copyCommandWords(allocator, source.items, commands.items);
+    defer {
+        for (words) |word| allocator.free(word);
+        allocator.free(words);
+    }
+    try std.testing.expectEqual(@as(usize, 20_000), words.len);
+    try std.testing.expectEqualStrings("command0", words[0]);
+    try std.testing.expectEqualStrings("command19999", words[words.len - 1]);
+}
+
+test "recovered command positions feed command metadata too" {
+    for ([_][]const u8{ "`external README.md", "() external", "foo=bar ! external" }) |source| {
+        var engine = try Engine.init(std.testing.allocator);
+        defer engine.deinit();
+        var syntax = try engine.highlight(source);
+        defer syntax.deinit(std.testing.allocator);
+        const state = FakeSemanticState{};
+        var analysis = try semantic.analyze(std.testing.allocator, source, try engine.rootNode(), &state);
+        defer analysis.deinit(std.testing.allocator);
+        var found = false;
+        for (analysis.commands) |command| {
+            if (command.text(source)) |word| {
+                if (std.mem.eql(u8, word, "external")) found = true;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
 test "quoted command words retain command semantics" {
     const source = "\"missing\"";
     var engine = try Engine.init(std.testing.allocator);
@@ -237,6 +299,22 @@ test "alias expansion projects changed command context onto original tokens" {
     try expectSemanticSpan(source, actual, "missing", .unknown_command);
     try expectSemanticSpan(source, actual, "output", .path);
     try expectSemanticSpan(source, actual, "external", .external_command);
+}
+
+test "alias analysis reports commands after bounded expansion" {
+    var alias_engine = try AliasEngine.init(std.testing.allocator);
+    defer alias_engine.deinit();
+    const state = FakeSemanticState{};
+
+    var direct = try alias_engine.analyze("py app.py", &state);
+    defer direct.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), direct.commands.len);
+    try std.testing.expectEqualStrings("python", direct.commands[0]);
+
+    var argument = try alias_engine.analyze("say", &state);
+    defer argument.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), argument.commands.len);
+    try std.testing.expectEqualStrings("print", argument.commands[0]);
 }
 
 test "safe scalar parameters may reveal a following command" {
@@ -404,6 +482,8 @@ const FakeSemanticState = struct {
         if (command_position and std.mem.eql(u8, word, "ll")) return .regular;
         if (command_position and
             (std.mem.eql(u8, word, "separator") or
+                std.mem.eql(u8, word, "py") or
+                std.mem.eql(u8, word, "say") or
                 std.mem.eql(u8, word, "redirect") or
                 std.mem.eql(u8, word, "cycle-a") or
                 std.mem.eql(u8, word, "cycle-b") or
@@ -438,6 +518,10 @@ const FakeSemanticState = struct {
     ) !?[]u8 {
         const expansion = if (std.mem.eql(u8, word, "separator"))
             "print ok;"
+        else if (std.mem.eql(u8, word, "py"))
+            "python"
+        else if (std.mem.eql(u8, word, "say"))
+            "print python"
         else if (std.mem.eql(u8, word, "redirect"))
             "print hi >"
         else if (std.mem.eql(u8, word, "PIPE"))

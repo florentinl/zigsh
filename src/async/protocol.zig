@@ -4,16 +4,21 @@ pub const magic: u32 = 0x4853_475a;
 pub const version: u8 = 1;
 pub const header_length = 20;
 pub const max_payload_length = 1024 * 1024;
+// Maximum unacknowledged request bytes, including the header. Credits are
+// zero-payload headers whose generation contains the number of bytes consumed.
+pub const request_credit = 4096;
 
 pub const Message = enum(u8) {
     request = 1,
     response = 2,
+    credit = 3,
 };
 
 pub const Job = enum(u8) {
     ping = 1,
     prompt_git = 2,
-    highlight = 3,
+    line_analysis = 3,
+    prompt_kubernetes = 4,
 };
 
 pub const Status = enum(u8) {
@@ -72,7 +77,7 @@ pub const Frame = struct {
 test "frame headers have a stable endian-independent encoding" {
     const expected = Header{
         .message = .request,
-        .job = .highlight,
+        .job = .line_analysis,
         .status = .ok,
         .generation = 0x0102_0304_0506_0708,
         .payload_length = 42,
@@ -98,4 +103,18 @@ test "frame headers reject oversized payloads" {
     }).encode();
     std.mem.writeInt(u32, encoded[16..20], max_payload_length + 1, .little);
     try std.testing.expectError(error.PayloadTooLarge, Header.decode(&encoded));
+}
+
+test "credit headers carry consumed request bytes without a payload" {
+    const encoded = (Header{
+        .message = .credit,
+        .job = .ping,
+        .status = .ok,
+        .generation = request_credit,
+        .payload_length = 0,
+    }).encode();
+    const decoded = try Header.decode(&encoded);
+    try std.testing.expectEqual(Message.credit, decoded.message);
+    try std.testing.expectEqual(@as(u64, request_credit), decoded.generation);
+    try std.testing.expectEqual(@as(u32, 0), decoded.payload_length);
 }
