@@ -42,12 +42,15 @@ const widget_name: [:0]const u8 = "zigsh-fd-event";
 const entry_capacity = 8;
 
 var widget: zle.Widget = .{};
+var preceding_widget: zle.Thingy = null;
 var entries: [entry_capacity]?Entry = @splat(null);
 var entry_count: usize = 0;
 var dispatching = false;
 
 pub fn setup() c_int {
-    widget.register(widget_name, dispatch) catch return 1;
+    // A worker response can become readable while Zsh is cycling an active
+    // completion menu. It is an editor event, not a new user command.
+    widget.register(widget_name, dispatch, zle.observer_widget_flags) catch return 1;
     return 0;
 }
 
@@ -58,8 +61,20 @@ pub fn cleanup() void {
         entry_count -= 1;
         entries[entry_count] = null;
     }
+    zle.releaseThingy(preceding_widget);
+    preceding_widget = null;
     dispatching = false;
     widget.unregister();
+}
+
+/// Zsh's `zle -F -w` hook path updates lbindk after the callback even when the
+/// widget has ZLE_NOLAST. Report the real widget which preceded this observer.
+pub fn lastNonEventWidget() zle.Thingy {
+    const last_widget = zle.lastWidget();
+    if (widget.ownsThingy(last_widget)) {
+        return preceding_widget;
+    }
+    return last_widget;
 }
 
 fn add(fd: c_int, callback: Callback) error{ CallbackAlreadyRegistered, CapacityExceeded }!void {
@@ -88,6 +103,15 @@ fn dispatch(_: [*c][*c]u8) callconv(.c) c_int {
     if (dispatching) return 0;
     dispatching = true;
     defer dispatching = false;
+
+    // On the first event, lbindk still identifies the preceding command. Keep
+    // that reference across repeated readiness notifications for this widget.
+    const last_widget = zle.lastWidget();
+    if (!widget.ownsThingy(last_widget)) {
+        const previous = zle.retainThingy(last_widget);
+        zle.releaseThingy(preceding_widget);
+        preceding_widget = previous;
+    }
 
     zle_hooks.applyExternal(runCallbacks());
     return 0;

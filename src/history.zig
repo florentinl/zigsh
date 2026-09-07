@@ -1,4 +1,5 @@
 const zle = @import("zle.zig");
+const zle_events = @import("zle_events.zig");
 
 const zsh = @cImport({
     @cInclude("Zle/zle.mdh");
@@ -9,15 +10,23 @@ const down_widget_name: [:0]const u8 = "zigsh-down-line-or-beginning-search";
 
 var up_widget: zle.Widget = .{};
 var down_widget: zle.Widget = .{};
-var searching_widget: zsh.Thingy = null;
+var searching_widget: zle.Thingy = null;
 var saved_cursor: c_int = 0;
 
 pub fn setup() c_int {
     configureHistory();
 
-    up_widget.register(up_widget_name, upLineOrBeginningSearch) catch return 1;
+    up_widget.register(
+        up_widget_name,
+        upLineOrBeginningSearch,
+        zsh.ZLE_LINEMOVE | zsh.ZLE_LASTCOL,
+    ) catch return 1;
 
-    down_widget.register(down_widget_name, downLineOrBeginningSearch) catch {
+    down_widget.register(
+        down_widget_name,
+        downLineOrBeginningSearch,
+        zsh.ZLE_LINEMOVE | zsh.ZLE_LASTCOL,
+    ) catch {
         cleanup();
         return 1;
     };
@@ -93,15 +102,14 @@ fn upLineOrBeginningSearch(args: [*c][*c]u8) callconv(.c) c_int {
 
     restoreSearchCursor();
     saved_cursor = zsh.zlecs;
-    searching_widget = zsh.bindk;
+    searching_widget = zle.currentWidget();
 
     _ = zsh.historybeginningsearchbackward(args);
     return zsh.endofline(args);
 }
 
 fn downLineOrBeginningSearch(args: [*c][*c]u8) callconv(.c) c_int {
-    const continued_search =
-        searching_widget != null and zsh.lbindk == searching_widget;
+    const continued_search = searchContinues();
     const right_buffer_has_newline = containsNewline(zsh.zlecs, zsh.zlell);
     const has_numeric_argument = (zsh.zmod.flags & zsh.MOD_MULT) != 0;
 
@@ -109,7 +117,7 @@ fn downLineOrBeginningSearch(args: [*c][*c]u8) callconv(.c) c_int {
         (continued_search or !right_buffer_has_newline))
     {
         restoreSearchCursor();
-        searching_widget = zsh.bindk;
+        searching_widget = zle.currentWidget();
         saved_cursor = zsh.zlecs;
 
         if (zsh.historybeginningsearchforward(args) == 0) {
@@ -126,9 +134,14 @@ fn downLineOrBeginningSearch(args: [*c][*c]u8) callconv(.c) c_int {
 }
 
 fn restoreSearchCursor() void {
-    if (searching_widget != null and zsh.lbindk == searching_widget) {
+    if (searchContinues()) {
         zsh.zlecs = saved_cursor;
     }
+}
+
+fn searchContinues() bool {
+    const search_widget = searching_widget orelse return false;
+    return zle_events.lastNonEventWidget() == search_widget;
 }
 
 fn containsNewline(start: c_int, end: c_int) bool {

@@ -13,13 +13,31 @@ pub const BindKeyError = error{
 };
 
 pub const WidgetCallback = *const fn ([*c][*c]u8) callconv(.c) c_int;
+pub const Thingy = zsh.Thingy;
+
+/// Flags for callbacks which observe editor state but do not represent a user
+/// command. They must not interrupt completion, remove its suffix, reset the
+/// remembered column, or replace the command state used by yank/repeat and
+/// history continuation.
+pub const observer_widget_flags = zsh.ZLE_MENUCMP |
+    zsh.ZLE_KEEPSUFFIX |
+    zsh.ZLE_LASTCOL |
+    zsh.ZLE_NOTCOMMAND |
+    zsh.ZLE_NOLAST;
 
 pub const Widget = struct {
     handle: zsh.Widget = null,
 
-    pub fn register(self: *Widget, name: [:0]const u8, callback: WidgetCallback) error{RegistrationFailed}!void {
+    /// `flags` are Zsh's private widget flags.  Callers that run outside the
+    /// normal key-dispatch path may need to preserve completion state.
+    pub fn register(
+        self: *Widget,
+        name: [:0]const u8,
+        callback: WidgetCallback,
+        flags: c_int,
+    ) error{RegistrationFailed}!void {
         if (self.handle != null) return;
-        self.handle = zsh.addzlefunction(@constCast(name.ptr), callback, 0);
+        self.handle = zsh.addzlefunction(@constCast(name.ptr), callback, flags);
         if (self.handle == null) return error.RegistrationFailed;
     }
 
@@ -27,7 +45,27 @@ pub const Widget = struct {
         if (self.handle) |registered| zsh.deletezlefunction(registered);
         self.handle = null;
     }
+
+    pub fn ownsThingy(self: *const Widget, thingy: Thingy) bool {
+        return self.handle != null and thingy != null and thingy.*.widget == self.handle;
+    }
 };
+
+pub fn currentWidget() Thingy {
+    return zsh.bindk;
+}
+
+pub fn lastWidget() Thingy {
+    return zsh.lbindk;
+}
+
+pub fn retainThingy(thingy: Thingy) Thingy {
+    return zsh.refthingy(thingy);
+}
+
+pub fn releaseThingy(thingy: Thingy) void {
+    zsh.unrefthingy(thingy);
+}
 
 /// Installs or replaces the `zle -F -w FD WIDGET` association without parsing
 /// shell source. `bin_zle` is ZLE's exported builtin handler; it owns the

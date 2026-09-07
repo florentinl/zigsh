@@ -46,7 +46,10 @@ var callback_count: usize = 0;
 var dispatching = false;
 
 pub fn setup() c_int {
-    widget.register(hook_name, dispatch) catch return 1;
+    // Zsh runs zle-line-pre-redraw between completion requests. This is an
+    // observer, not a command. Zsh additionally restores bindk/lbindk for
+    // this particular hook in redrawhook().
+    widget.register(hook_name, dispatch, zle.observer_widget_flags) catch return 1;
     return 0;
 }
 
