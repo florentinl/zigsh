@@ -1,0 +1,22 @@
+class Zigsh < Formula
+  desc "Native Zsh module implemented in Zig"
+  homepage "https://github.com/florentinl/zigsh"
+  url "@SOURCE_URL@"
+  version "@VERSION@"
+  sha256 "@SOURCE_SHA256@"
+  license "MIT"
+
+  depends_on "zig" => :build
+  depends_on "zsh"
+
+  def install
+    system "zig", "build", "-Doptimize=ReleaseSafe"
+    libexec.install "zig-out/lib/zigsh.so"
+    prefix.install "packaging/zigsh.sh"
+  end
+
+  test do
+    system Formula["zsh"].opt_bin/"zsh", "-fc",
+           "source #{prefix}/zigsh.sh; zmodload -e zigsh; zmodload -u zigsh"
+  end
+end

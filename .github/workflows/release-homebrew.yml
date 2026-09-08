@@ -1,0 +1,94 @@
+name: Release Homebrew bottle
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - Formula/zigsh.rb
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-homebrew-main
+  cancel-in-progress: false
+
+jobs:
+  bottle:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Test
+        run: zig build test
+
+      - name: Set release metadata
+        id: metadata
+        run: |
+          version="0.1.0.${GITHUB_RUN_NUMBER}"
+          tag="v${version}"
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/${GITHUB_SHA}.tar.gz"
+          curl --fail --location --silent --show-error --output source.tar.gz "$source_url"
+          source_sha256="$(shasum -a 256 source.tar.gz | awk '{print $1}')"
+          root_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
+          echo "source_sha256=$source_sha256" >> "$GITHUB_OUTPUT"
+          echo "root_url=$root_url" >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          SOURCE_URL: ${{ steps.metadata.outputs.source_url }}
+          SOURCE_SHA256: ${{ steps.metadata.outputs.source_sha256 }}
+        run: |
+          mkdir -p Formula
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@SOURCE_URL@|${SOURCE_URL}|g" \
+            -e "s|@SOURCE_SHA256@|${SOURCE_SHA256}|g" \
+            packaging/zigsh.rb.in > Formula/zigsh.rb
+
+      - name: Build bottle
+        run: |
+          brew install --build-bottle --formula Formula/zigsh.rb
+          brew bottle --json --root-url="${{ steps.metadata.outputs.root_url }}" zigsh
+
+      - name: Publish bottle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          gh release create "$TAG" --target "$GITHUB_SHA" --generate-notes zigsh--*.bottle.tar.gz
+
+      - name: Add bottle checksums to the formula
+        run: |
+          brew bottle --merge zigsh--*.bottle.json --write --no-commit
+
+      - name: Sign and commit the formula
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          install -m 600 /dev/null signing_key
+          printf '%s\n' "$SIGNING_KEY" > signing_key
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config gpg.format ssh
+          git config user.signingkey "$PWD/signing_key"
+          git config commit.gpgsign true
+          git add Formula/zigsh.rb
+          git commit -S -m "brew: release zigsh ${{ steps.metadata.outputs.version }}"
+          git push

@@ -9,6 +9,29 @@ implemented in Zig.  Loading it will eventually cover everything...
 - fzf like history searching
 - auto completion hints ?
 
+## Homebrew
+
+Install the dedicated tap and formula:
+
+```zsh
+brew tap florentinl/zigsh https://github.com/florentinl/zigsh
+brew install florentinl/zigsh/zigsh
+```
+
+Installing the formula only places the module and its opt-in loader on disk; it
+does not load Zigsh, modify `~/.zshrc`, or otherwise initialize a shell. Add
+this line to an interactive Zsh setup only when you want to enable it:
+
+```zsh
+source "$(brew --prefix zigsh)/zigsh.sh"
+```
+
+Remove that line (and restart the shell) to stop loading Zigsh. The loader is
+also safe to source manually and does nothing when `zigsh` is already loaded.
+
+New bottles are published from `main`; retrieve them with `brew update && brew
+upgrade zigsh`.
+
 ## Command-aware prompt
 
 - **Python** shows the active `VIRTUAL_ENV`. A `.venv` directory uses its parent
