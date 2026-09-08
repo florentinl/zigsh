@@ -32,6 +32,9 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Install Zsh header-build dependency
+        run: brew install autoconf
+
       - name: Test
         run: zig build test
 
