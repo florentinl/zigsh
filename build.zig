@@ -373,6 +373,7 @@ fn registerUnitTest(
         .root_source_file = b.path(path),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     const unit_tests = b.addTest(.{ .root_module = unit_test_module });
     const run_unit_tests = b.addRunArtifact(unit_tests);

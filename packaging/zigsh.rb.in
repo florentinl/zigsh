@@ -9,7 +9,6 @@ class Zigsh < Formula
   depends_on "autoconf" => :build
   depends_on "ncurses" => :build
   depends_on "zig" => :build
-  depends_on "zsh"
 
   def install
     system "zig", "build", "-Doptimize=ReleaseSafe",
@@ -19,7 +18,7 @@ class Zigsh < Formula
   end
 
   test do
-    system Formula["zsh"].opt_bin/"zsh", "-fc",
+    system "/bin/zsh", "-fc",
            "source #{prefix}/zigsh.sh; zmodload -e zigsh; zmodload -u zigsh"
   end
 end
