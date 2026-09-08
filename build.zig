@@ -149,6 +149,9 @@ fn addZigshLibrary(
     });
     // Zsh resolves its module API from the running shell process.
     zigsh.linker_allow_shlib_undefined = true;
+    if (zigsh.rootModuleTarget().os.tag.isDarwin()) {
+        zigsh.headerpad_max_install_names = true;
+    }
     return zigsh;
 }
 
