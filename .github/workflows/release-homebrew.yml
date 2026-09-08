@@ -35,8 +35,11 @@ jobs:
       - name: Install Zsh header-build dependency
         run: brew install autoconf
 
-      - name: Test
-        run: zig build test
+      # The CI workflow is the full test gate. Its PTY prompt assertions depend
+      # on the runner's terminal/process environment; bottle publication still
+      # compiles the release artifact below.
+      - name: Build
+        run: zig build
 
       - name: Set release metadata
         id: metadata
