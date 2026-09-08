@@ -5,8 +5,8 @@
     .fingerprint = 0x398d_a900_cbb1_47d5,
     .dependencies = .{
         .tree_sitter = .{
-            .url = "git+https://github.com/tree-sitter/zig-tree-sitter#c18983f9dee9acb63d816e79ada2eff186ed1ddf",
-            .hash = "tree_sitter-0.26.0-8heIf3CaAQDeVTQc0DMSBhbQAEx5aF-dTen4_LPxMgrv",
+            .url = "git+https://github.com/tree-sitter/zig-tree-sitter#b562510b5563dcf3b7fcac4a5fe9d60834c84667",
+            .hash = "tree_sitter-0.26.0-8heIf-vDAQDh0HhAAUVwVZFmLrwSKMZl5gRaVFqtas0W",
         },
     },
     .paths = .{
