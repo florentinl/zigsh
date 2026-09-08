@@ -13,7 +13,7 @@ if [ ! -f "$zsh_dir/Src/zsh.mdh" ]; then
     (
         cd "$zsh_dir"
         sh Util/preconfig
-        ./configure
+        ./configure --with-tcsetpgrp
         make -C Src headers
     )
 fi
