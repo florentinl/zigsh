@@ -2,6 +2,7 @@ const std = @import("std");
 
 const ZshConfiguration = struct {
     include_path: []const u8,
+    ncurses_include_path: ?[]const u8,
     prepare: ?*std.Build.Step.Run,
 };
 
@@ -32,7 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    configureZshModule(zigsh_module, zsh.include_path);
+    configureZshModule(zigsh_module, zsh);
     configureParserModule(zigsh_module, tree_sitter, tree_sitter.scanner_source);
 
     const zigsh = addZigshLibrary(b, zigsh_module);
@@ -97,13 +98,22 @@ fn configureParserModule(
 }
 
 fn configureZsh(b: *std.Build) ZshConfiguration {
+    const ncurses_include_path = b.option(
+        []const u8,
+        "ncurses-include",
+        "Add an ncurses include directory for configured Zsh headers",
+    );
     const configured_include = b.option(
         []const u8,
         "zsh-include",
         "Use an existing configured Zsh Src directory instead of vendor/zsh/Src",
     );
     if (configured_include) |include_path| {
-        return .{ .include_path = include_path, .prepare = null };
+        return .{
+            .include_path = include_path,
+            .ncurses_include_path = ncurses_include_path,
+            .prepare = null,
+        };
     }
 
     const prepare = b.addSystemCommand(&.{
@@ -111,11 +121,18 @@ fn configureZsh(b: *std.Build) ZshConfiguration {
         "scripts/prepare-zsh.sh",
         "vendor/zsh",
     });
-    return .{ .include_path = "vendor/zsh/Src", .prepare = prepare };
+    return .{
+        .include_path = "vendor/zsh/Src",
+        .ncurses_include_path = ncurses_include_path,
+        .prepare = prepare,
+    };
 }
 
-fn configureZshModule(module: *std.Build.Module, zsh_include: []const u8) void {
-    module.addIncludePath(.{ .cwd_relative = zsh_include });
+fn configureZshModule(module: *std.Build.Module, zsh: ZshConfiguration) void {
+    module.addIncludePath(.{ .cwd_relative = zsh.include_path });
+    if (zsh.ncurses_include_path) |include_path| {
+        module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    }
     // zsh.mdh normally renames these symbols for its own modules. An external
     // module must retain the loader's conventional names: boot_, setup_, etc.
     module.addCMacro("IMPORTING_MODULE_zshQsmain", "1");
@@ -311,7 +328,7 @@ fn registerAsyncUnitTests(
         .optimize = optimize,
         .link_libc = true,
     });
-    configureZshModule(unit_module, zsh.include_path);
+    configureZshModule(unit_module, zsh);
     configureParserModule(unit_module, tree_sitter, tree_sitter.scanner_source);
     const unit_tests = b.addTest(.{ .root_module = unit_module });
     dependOnZshPreparation(&unit_tests.step, zsh);
@@ -335,7 +352,7 @@ fn registerZshUnitTest(
         .optimize = optimize,
         .link_libc = true,
     });
-    configureZshModule(unit_test_module, zsh.include_path);
+    configureZshModule(unit_test_module, zsh);
     const unit_tests = b.addTest(.{ .root_module = unit_test_module });
     dependOnZshPreparation(&unit_tests.step, zsh);
     const run_unit_tests = b.addRunArtifact(unit_tests);

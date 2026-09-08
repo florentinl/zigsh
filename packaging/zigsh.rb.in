@@ -7,11 +7,13 @@ class Zigsh < Formula
   license "MIT"
 
   depends_on "autoconf" => :build
+  depends_on "ncurses" => :build
   depends_on "zig" => :build
   depends_on "zsh"
 
   def install
-    system "zig", "build", "-Doptimize=ReleaseSafe"
+    system "zig", "build", "-Doptimize=ReleaseSafe",
+           "-Dncurses-include=#{Formula["ncurses"].opt_include}"
     libexec.install "zig-out/lib/zigsh.so"
     prefix.install "packaging/zigsh.sh"
   end
