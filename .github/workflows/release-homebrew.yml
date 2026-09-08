@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   bottle:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.repository.private == false && github.actor != 'github-actions[bot]'
     runs-on: macos-14
     timeout-minutes: 45
 
