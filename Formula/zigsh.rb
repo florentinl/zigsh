@@ -1,20 +1,19 @@
 class Zigsh < Formula
   desc "Native Zsh module implemented in Zig"
   homepage "https://github.com/florentinl/zigsh"
-  url "https://github.com/florentinl/zigsh/archive/0d4f4a455a583e2f8c2f9be03c0693c3476ed9d4.tar.gz"
-  version "0.1.0.10"
-  sha256 "474672920a10df4182205c654b91f772ff1d2ee49aad95f98c688f75ff89efba"
+  url "https://github.com/florentinl/zigsh/archive/790d9ba5c11c6eaaf9c75c68a48a8f1547d61010.tar.gz"
+  version "0.1.0.11"
+  sha256 "549fa7378942cd23964d830aba14960120b7cf56526574261bbfa2fde369ebab"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/florentinl/zigsh/releases/download/v0.1.0.10"
-    sha256 cellar: :any, arm64_sonoma: "b95b9703a0d5324285cdfd5923d0b42bc794a78dfc8feab438a79ebf61625c86"
+    root_url "https://github.com/florentinl/zigsh/releases/download/v0.1.0.11"
+    sha256 cellar: :any, arm64_sonoma: "bfeff7536438686d3c96818fa5b3972c4d9f4ac19425918b99cfd6b2aaa2572c"
   end
 
   depends_on "autoconf" => :build
   depends_on "ncurses" => :build
   depends_on "zig" => :build
-  depends_on "zsh"
 
   def install
     system "zig", "build", "-Doptimize=ReleaseSafe",
@@ -24,7 +23,7 @@ class Zigsh < Formula
   end
 
   test do
-    system Formula["zsh"].opt_bin/"zsh", "-fc",
+    system "/bin/zsh", "-fc",
            "source #{prefix}/zigsh.sh; zmodload -e zigsh; zmodload -u zigsh"
   end
 end
