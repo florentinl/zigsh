@@ -71,8 +71,12 @@ jobs:
 
       - name: Build bottle
         run: |
-          brew install --build-bottle --formula Formula/zigsh.rb
-          brew bottle --json --root-url="${{ steps.metadata.outputs.root_url }}" zigsh
+          brew tap florentinl/zigsh "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          tap_dir="$(brew --repository florentinl/zigsh)"
+          mkdir -p "$tap_dir/Formula"
+          cp Formula/zigsh.rb "$tap_dir/Formula/zigsh.rb"
+          brew install --build-bottle florentinl/zigsh/zigsh
+          brew bottle --json --root-url="${{ steps.metadata.outputs.root_url }}" florentinl/zigsh/zigsh
 
       - name: Publish bottle
         env:
@@ -84,6 +88,7 @@ jobs:
       - name: Add bottle checksums to the formula
         run: |
           brew bottle --merge zigsh--*.bottle.json --write --no-commit
+          cp "$(brew --repository florentinl/zigsh)/Formula/zigsh.rb" Formula/zigsh.rb
 
       - name: Sign and commit the formula
         env:
